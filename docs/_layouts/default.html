@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="{{ page.lang | default: site.lang | default: 'en' }}">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    {%- seo -%}
+
+    {%- if page.keywords -%}
+      <meta name="keywords" content="{{ page.keywords }}">
+    {%- endif -%}
+
+    <link rel="stylesheet" href="{{ '/assets/css/style.css?v=' | append: site.github.build_revision | relative_url }}">
+  </head>
+
+  <body>
+    <div class="wrapper">
+      <header>
+        <h1><a href="{{ '/' | relative_url }}">{{ site.title }}</a></h1>
+        {%- if site.description -%}
+          <p>{{ site.description }}</p>
+        {%- endif -%}
+
+        <p>
+          <a href="{{ '/models/' | relative_url }}">Model Catalog</a>
+          ·
+          <a href="{{ site.github.repository_url }}">GitHub Repo</a>
+        </p>
+      </header>
+
+      <section>
+        {{ content }}
+      </section>
+
+      <footer>
+        <p><small>© {{ site.time | date: "%Y" }} {{ site.title }} · Built with GitHub Pages</small></p>
+      </footer>
+    </div>
+  </body>
+</html>
