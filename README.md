@@ -7,8 +7,8 @@ Reference **Diffusers LoRA inference pipelines** (plus an optional HTTP server) 
 Supports **27+ models** across image generation, editing, and video: FLUX.1/FLUX.2, Flex, SD/SDXL, Qwen Image (and Edit variants), Z-Image, Wan 2.1/2.2, LTX-2, Chroma, HiDream, Lumina2, OmniGen2, and more.
 
 <p>
-  <a href="https://runcomfy-com.github.io/ai-toolkit-inference/">Docs Home</a> ·
-  <a href="https://runcomfy-com.github.io/ai-toolkit-inference/models/">Model Catalog</a> ·
+  <a href="https://ai-toolkit-docs.runcomfy.com/">Docs Home</a> ·
+  <a href="https://ai-toolkit-docs.runcomfy.com/models/">Model Catalog</a> ·
   <a href="ComfyUI.md">ComfyUI</a> ·
   <a href="https://www.runcomfy.com/trainer/ai-toolkit/app">Cloud AI Toolkit (Train+Inference)</a> ·
   <a href="#quickstart-http-api">Quickstart</a> ·
@@ -31,20 +31,20 @@ Note: if your main blocker is environment drift (CUDA/PyTorch/Diffusers versions
 
 ## Docs and model pages
 
-- **Docs Home (GitHub Pages):** https://runcomfy-com.github.io/ai-toolkit-inference/
-- **Model Catalog (by model id):** https://runcomfy-com.github.io/ai-toolkit-inference/models/
+- **Docs Home (GitHub Pages):** https://ai-toolkit-docs.runcomfy.com/
+- **Model Catalog (by model id):** https://ai-toolkit-docs.runcomfy.com/models/
 
 Popular model docs (each page includes defaults + what commonly causes preview mismatch for that model):
 
-- [LTX-2 video T2V/I2V](https://runcomfy-com.github.io/ai-toolkit-inference/models/ltx2/) (`model="ltx2"`)
-- [Wan 2.2 14B T2V MoE LoRA inference](https://runcomfy-com.github.io/ai-toolkit-inference/models/wan22-14b-t2v/) (`model="wan22_14b_t2v"`)
-- [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://runcomfy-com.github.io/ai-toolkit-inference/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
-- [Z-Image Turbo LoRA inference (few-step defaults)](https://runcomfy-com.github.io/ai-toolkit-inference/models/zimage-turbo/) (`model="zimage_turbo"`)
-- [FLUX.2-dev LoRA inference](https://runcomfy-com.github.io/ai-toolkit-inference/models/flux2/) (`model="flux2"`)
-- [FLUX Kontext LoRA inference (control-image edit)](https://runcomfy-com.github.io/ai-toolkit-inference/models/flux-kontext/) (`model="flux_kontext"`)
-- [Flex.1 LoRA inference](https://runcomfy-com.github.io/ai-toolkit-inference/models/flex1/) (`model="flex1"`)
-- [Qwen Image LoRA inference (including Edit variants)](https://runcomfy-com.github.io/ai-toolkit-inference/models/qwen-image/) (`model="qwen_image"` and variants)
-- [SDXL LoRA inference](https://runcomfy-com.github.io/ai-toolkit-inference/models/sdxl/) (`model="sdxl"`)
+- [LTX-2 video T2V/I2V](https://ai-toolkit-docs.runcomfy.com/models/ltx2/) (`model="ltx2"`)
+- [Wan 2.2 14B T2V MoE LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-t2v/) (`model="wan22_14b_t2v"`)
+- [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
+- [Z-Image Turbo LoRA inference (few-step defaults)](https://ai-toolkit-docs.runcomfy.com/models/zimage-turbo/) (`model="zimage_turbo"`)
+- [FLUX.2-dev LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2/) (`model="flux2"`)
+- [FLUX Kontext LoRA inference (control-image edit)](https://ai-toolkit-docs.runcomfy.com/models/flux-kontext/) (`model="flux_kontext"`)
+- [Flex.1 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flex1/) (`model="flex1"`)
+- [Qwen Image LoRA inference (including Edit variants)](https://ai-toolkit-docs.runcomfy.com/models/qwen-image/) (`model="qwen_image"` and variants)
+- [SDXL LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/sdxl/) (`model="sdxl"`)
 
 ---
 
@@ -307,7 +307,7 @@ If you're trying to reproduce the preview you validated during training:
 1) start with the reference server pipeline for your model, then
 2) customize one variable at a time.
 
-For "by model" notes: https://runcomfy-com.github.io/ai-toolkit-inference/models/
+For "by model" notes: https://ai-toolkit-docs.runcomfy.com/models/
 
 ---
 
