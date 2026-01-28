@@ -1,7 +1,7 @@
 title: AI Toolkit Inference
 description: Reproducible Diffusers LoRA inference pipelines for adapters trained with ostris/ai-toolkit.
-url: "https://runcomfy-com.github.io"
-baseurl: "/ai-toolkit-inference"
+url: "https://ai-toolkit-docs.runcomfy.com"
+baseurl: ""
 permalink: pretty
 theme: jekyll-theme-minimal
 plugins:
