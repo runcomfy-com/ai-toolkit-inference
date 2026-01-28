@@ -6,6 +6,7 @@ class lazily at execution time.
 All nodes:
 - return IMAGE (ComfyUI batch tensors)
 - support optional LoRA path (single local path or URL) and lora_scale
+  (Wan 2.2 14B MoE nodes instead use high/low path + scale inputs)
 - support optional HuggingFace token
 
 Video models return IMAGE batches where batch dimension is frames.
@@ -32,7 +33,7 @@ def _lora_path_to_list(lora_path: str) -> List[str]:
     """Convert a user-provided LoRA path field into the internal lora_paths list.
 
     Note: ComfyUI nodes currently support **one LoRA only** (either a local path or a URL).
-    For Wan 2.2 14B MoE models we use the dedicated lora_path_high / lora_path_low inputs.
+    For Wan 2.2 14B MoE models we use dedicated high/low path + scale inputs.
     """
     if not lora_path or not lora_path.strip():
         return []
@@ -144,7 +145,7 @@ class _RCAitkBase:
             raise ValueError("prompt is required")
 
         negative_prompt = kwargs.get("negative_prompt", "") if self.SUPPORTS_NEGATIVE else ""
-        lora_scale = float(kwargs.get("lora_scale", 1.0))
+        lora_scale_value: Union[float, Dict[str, float]] = float(kwargs.get("lora_scale", 1.0))
         hf_token = kwargs.get("hf_token", "") or None
 
         # Handle LoRA paths.
@@ -160,6 +161,18 @@ class _RCAitkBase:
             if low:
                 d["low"] = low
             lora_paths = [d] if d else []
+
+            has_scale_high = "lora_scale_high" in kwargs
+            has_scale_low = "lora_scale_low" in kwargs
+            if not has_scale_high and not has_scale_low:
+                # Backward-compatible fallback: apply legacy single scale to both sides.
+                legacy_scale = kwargs.get("lora_scale", 1.0)
+                lora_scale_value = {"high": float(legacy_scale), "low": float(legacy_scale)}
+            else:
+                lora_scale_value = {
+                    "high": float(kwargs.get("lora_scale_high", 1.0)),
+                    "low": float(kwargs.get("lora_scale_low", 1.0)),
+                }
 
         # Control images
         control_image = None
@@ -188,7 +201,7 @@ class _RCAitkBase:
             enable_cpu_offload=self.ENABLE_CPU_OFFLOAD,
             hf_token=hf_token,
             lora_paths=lora_paths,
-            lora_scale=lora_scale,
+            lora_scale=lora_scale_value,
         )
 
         # Special-case FLUX.2: the underlying ai-toolkit pipeline expects prompt-like
@@ -562,9 +575,12 @@ class RCWan22T2V14B(_RCAitkBase):
     @classmethod
     def INPUT_TYPES(cls):
         base = super().INPUT_TYPES()
+        base["optional"].pop("lora_path", None)
+        base["optional"].pop("lora_scale", None)
         base["optional"]["lora_path_high"] = ("STRING", {"default": ""})
         base["optional"]["lora_path_low"] = ("STRING", {"default": ""})
-        # hide generic lora_path for MoE models (keep for backward compat)
+        base["optional"]["lora_scale_high"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
+        base["optional"]["lora_scale_low"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
         return base
 
     def _pipeline_ctor(self):
@@ -582,8 +598,12 @@ class RCWan22I2V14B(_RCAitkBase):
     @classmethod
     def INPUT_TYPES(cls):
         base = super().INPUT_TYPES()
+        base["optional"].pop("lora_path", None)
+        base["optional"].pop("lora_scale", None)
         base["optional"]["lora_path_high"] = ("STRING", {"default": ""})
         base["optional"]["lora_path_low"] = ("STRING", {"default": ""})
+        base["optional"]["lora_scale_high"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
+        base["optional"]["lora_scale_low"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05})
         return base
 
     def _pipeline_ctor(self):
