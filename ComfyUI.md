@@ -69,7 +69,9 @@ All nodes are under the `RunComfy-Inference` category.
   - One LoRA only at the moment (no stacking / no comma-separated lists).
   - Can be a local path or a URL. URLs are downloaded to a local cache (`AITK_LORA_CACHE_DIR`, default `/tmp/lora_cache`).
   - Hugging Face tip: if you paste a `.../blob/...` URL, we automatically rewrite it to `.../resolve/...` so the file downloads correctly.
+  - Not used on Wan 2.2 14B MoE nodes (use high/low inputs below).
 - `lora_scale` (FLOAT)
+  - Not used on Wan 2.2 14B MoE nodes (use high/low scales below).
 - `hf_token` (STRING, optional)
 
 ### Control-image models
@@ -105,8 +107,10 @@ They expose `num_frames` and `fps` as optional inputs.
 
 - `lora_path_high`
 - `lora_path_low`
+- `lora_scale_high`
+- `lora_scale_low`
 
-(Instead of using the single `lora_path` string.)
+(Instead of the single `lora_path` / `lora_scale` inputs.)
 
 ## Available nodes (class types)
 

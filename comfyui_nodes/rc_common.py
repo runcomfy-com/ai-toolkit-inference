@@ -80,6 +80,24 @@ def _normalize_lora_paths_for_cache(lora_paths: List[Union[str, Dict[str, str]]]
     return tuple(norm)
 
 
+def _normalize_lora_scale_for_cache(
+    lora_scale: Union[float, Dict[str, float]],
+) -> Union[float, Tuple[Tuple[str, float], ...]]:
+    """Turn lora_scale into a hashable key (supports MoE dict)."""
+    if isinstance(lora_scale, dict):
+        return tuple(sorted((k, float(v)) for k, v in lora_scale.items()))
+    return float(lora_scale)
+
+
+def _normalize_lora_scale_value(
+    lora_scale: Union[float, Dict[str, float]],
+) -> Union[float, Dict[str, float]]:
+    """Normalize lora_scale to concrete float values for pipeline loading."""
+    if isinstance(lora_scale, dict):
+        return {k: float(v) for k, v in lora_scale.items() if v is not None}
+    return float(lora_scale)
+
+
 def _maybe_download_lora_paths(lora_paths: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
     """Download URL-based LoRAs to a local cache dir.
 
@@ -114,7 +132,7 @@ class PipelineCacheKey:
     model_id: str
     hf_token: Optional[str]
     lora_paths_key: Tuple
-    lora_scale: float
+    lora_scale_key: Union[float, Tuple[Tuple[str, float], ...]]
 
 
 _PIPELINE_CACHE: Dict[str, Any] = {
@@ -130,7 +148,7 @@ def get_or_load_pipeline(
     enable_cpu_offload: bool,
     hf_token: Optional[str],
     lora_paths: List[Union[str, Dict[str, str]]],
-    lora_scale: float,
+    lora_scale: Union[float, Dict[str, float]],
 ) -> Any:
     """Load and cache a single pipeline instance.
 
@@ -139,11 +157,12 @@ def get_or_load_pipeline(
     global _PIPELINE_CACHE
 
     resolved_loras = _maybe_download_lora_paths(lora_paths)
+    scale_value = _normalize_lora_scale_value(lora_scale)
     key = PipelineCacheKey(
         model_id=model_id,
         hf_token=hf_token or None,
         lora_paths_key=_normalize_lora_paths_for_cache(resolved_loras),
-        lora_scale=float(lora_scale),
+        lora_scale_key=_normalize_lora_scale_for_cache(scale_value),
     )
 
     if _PIPELINE_CACHE["instance"] is not None and _PIPELINE_CACHE["key"] == key:
@@ -157,9 +176,9 @@ def get_or_load_pipeline(
         _PIPELINE_CACHE["instance"] = None
         _PIPELINE_CACHE["key"] = None
 
-    logger.info(f"Loading pipeline model_id={model_id} loras={resolved_loras} scale={lora_scale}")
+    logger.info(f"Loading pipeline model_id={model_id} loras={resolved_loras} scale={scale_value}")
     pipe = pipeline_ctor(device="cuda", enable_cpu_offload=enable_cpu_offload, hf_token=hf_token or None)
-    pipe.load(lora_paths=resolved_loras, lora_scale=float(lora_scale))
+    pipe.load(lora_paths=resolved_loras, lora_scale=scale_value)
 
     _PIPELINE_CACHE["instance"] = pipe
     _PIPELINE_CACHE["key"] = key

@@ -14,12 +14,12 @@
       "sample_steps": 25,
       "guidance_scale": 4.0,
       "seed": 42,
-      "lora_path": "",
-      "lora_scale": 1.0,
       "num_frames": 41,
       "fps": 16,
       "lora_path_high": "",
       "lora_path_low": "",
+      "lora_scale_high": 1.0,
+      "lora_scale_low": 1.0,
       "control_image": [
         "0",
         0
