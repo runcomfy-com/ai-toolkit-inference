@@ -86,4 +86,5 @@ If you are trying to reproduce AI Toolkit sample previews, treat the code linked
 
 ## Related
 
+- [Z-Image](../zimage/)
 - [Z-Image Turbo](../zimage-turbo/)

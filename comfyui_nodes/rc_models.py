@@ -292,6 +292,17 @@ class _RCAitkBase:
 
 # ===== Model-specific nodes =====
 
+class RCZimage(_RCAitkBase):
+    MODEL_ID = "zimage"
+    DISPLAY_NAME = "RC Z-Image"
+    DEFAULT_STEPS = 30
+    DEFAULT_GUIDANCE = 4.0
+
+    def _pipeline_ctor(self):
+        from src.pipelines.zimage import ZImagePipeline
+        return ZImagePipeline
+
+
 class RCZimageTurbo(_RCAitkBase):
     MODEL_ID = "zimage_turbo"
     DISPLAY_NAME = "RC Z-Image Turbo"

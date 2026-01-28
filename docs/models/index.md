@@ -47,6 +47,7 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | [SD 1.5](sd15/) | `sd15` | `stable-diffusion-v1-5/stable-diffusion-v1-5` | Uses a DDPMScheduler config aligned to AI Toolkit defaults. |
 | [Qwen Image](qwen-image/) | `qwen_image` | `Qwen/Qwen-Image` | Guidance is passed as `true_cfg_scale` in Diffusers. |
 | [Qwen Image (2512)](qwen-image-2512/) | `qwen_image_2512` | `Qwen/Qwen-Image-2512` | Uses `fuse_lora` (weights are merged), so LoRA scale is not dynamically adjustable. |
+| [Z-Image](zimage/) | `zimage` | `Tongyi-MAI/Z-Image` | Base Z-Image model. Defaults (30 steps / CFG 4.0) are tuned for preview matching. |
 | [Z-Image Turbo](zimage-turbo/) | `zimage_turbo` | `Tongyi-MAI/Z-Image-Turbo` | Few-step model: the defaults (8 steps / CFG 1.0) are part of the model’s intended regime. |
 | [Z-Image De-Turbo](zimage-deturbo/) | `zimage_deturbo` | `Tongyi-MAI/Z-Image-Turbo` | Assembles the pipeline from separate components (transformer from `ostris/Z-Image-De-Turbo`). |
 | [Chroma](chroma/) | `chroma` | `lodestones/Chroma1-Base` | Requires AI Toolkit for the custom pipeline and quantization path. LoRA is merged before quantization. |

@@ -157,6 +157,7 @@ Minimal example workflows are provided in `example_workflows/`:
 
 - `example_workflows/rc_zimage_turbo_minimal.json`
 - `example_workflows/rc_zimage_deturbo_minimal.json`
+- `example_workflows/rc_zimage_minimal.json`
 - `example_workflows/rc_sd15_minimal.json`
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.

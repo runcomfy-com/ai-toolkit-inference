@@ -68,13 +68,13 @@ If you are trying to reproduce AI Toolkit sample previews, treat the code linked
 ## Pipeline behavior that matters
 
 - Few-step model: defaults (8 steps / CFG 1.0) are part of the intended operating regime.
-- Uses `diffusers.ZImagePipeline` if available; otherwise falls back to `FluxPipeline` (which changes results).
+- Requires `diffusers.ZImagePipeline` (upgrade diffusers if missing).
 - LoRA is applied as an adapter and can be re-scaled per request.
 
 ## Preview-matching notes (training preview vs inference mismatch)
 
 - Start from **8 steps / CFG 1.0**. Large changes in steps/CFG can look like ‘the LoRA isn’t applied’ for distilled few-step models.
-- If your diffusers build doesn’t include `ZImagePipeline`, the fallback path is `FluxPipeline` (expect different outputs).
+- If your diffusers build doesn’t include `ZImagePipeline`, upgrade diffusers to match AI Toolkit.
 - Width/height are floored to a multiple of **32**.
 
 ## What to compare when debugging mismatch
@@ -87,4 +87,5 @@ If you are trying to reproduce AI Toolkit sample previews, treat the code linked
 
 ## Related
 
+- [Z-Image](../zimage/)
 - [Z-Image De-Turbo](../zimage-deturbo/)

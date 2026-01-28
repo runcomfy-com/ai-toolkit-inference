@@ -1,5 +1,6 @@
 """ComfyUI nodes for ai-toolkit-inference pipelines."""
 from .rc_models import (
+    RCZimage,
     RCZimageTurbo,
     RCZimageDeturbo,
     RCFluxDev,
@@ -33,6 +34,7 @@ from .rc_models import (
 
 NODE_CLASS_MAPPINGS = {
     # Z-Image
+    "RCZimage": RCZimage,
     "RCZimageTurbo": RCZimageTurbo,
     "RCZimageDeturbo": RCZimageDeturbo,
 
@@ -77,6 +79,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "RCZimage": "RC Z-Image",
     "RCZimageTurbo": "RC Z-Image Turbo",
     "RCZimageDeturbo": "RC Z-Image De-Turbo",
 

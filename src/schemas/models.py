@@ -38,6 +38,7 @@ class ModelType(str, Enum):
     QWEN_IMAGE_EDIT_PLUS_2511 = "qwen_image_edit_plus_2511"
 
     # Z-Image family
+    ZIMAGE = "zimage"
     ZIMAGE_TURBO = "zimage_turbo"
     ZIMAGE_DETURBO = "zimage_deturbo"
 

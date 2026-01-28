@@ -35,6 +35,7 @@ from .qwen_image import (
 )
 
 # Z-Image family
+from .zimage import ZImagePipeline
 from .zimage_turbo import ZImageTurboPipeline
 from .zimage_deturbo import ZImageDeturboPipeline
 
@@ -92,6 +93,7 @@ PIPELINE_REGISTRY: dict[ModelType, Type[BasePipeline]] = {
     ModelType.QWEN_IMAGE_EDIT_PLUS_2509: QwenImageEditPlus2509Pipeline,
     ModelType.QWEN_IMAGE_EDIT_PLUS_2511: QwenImageEditPlus2511Pipeline,
     # Z-Image family
+    ModelType.ZIMAGE: ZImagePipeline,
     ModelType.ZIMAGE_TURBO: ZImageTurboPipeline,
     ModelType.ZIMAGE_DETURBO: ZImageDeturboPipeline,
     # Wan 2.1 family
@@ -160,6 +162,7 @@ __all__ = [
     "QwenImageEditPlus2509Pipeline",
     "QwenImageEditPlus2511Pipeline",
     # Z-Image family
+    "ZImagePipeline",
     "ZImageTurboPipeline",
     "ZImageDeturboPipeline",
     # Wan 2.1 family
