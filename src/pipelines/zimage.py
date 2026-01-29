@@ -1,5 +1,5 @@
 """
-Z-Image Turbo pipeline implementation.
+Z-Image pipeline implementation.
 """
 
 import logging
@@ -14,34 +14,44 @@ from ..schemas.models import ModelType
 logger = logging.getLogger(__name__)
 
 
-class ZImageTurboPipeline(BasePipeline):
+SCHEDULER_CONFIG = {
+    "num_train_timesteps": 1000,
+    "use_dynamic_shifting": False,
+    "shift": 3.0,
+}
+
+
+class ZImagePipeline(BasePipeline):
     """
-    Z-Image Turbo pipeline.
+    Z-Image pipeline.
     """
 
     CONFIG = PipelineConfig(
-        model_type=ModelType.ZIMAGE_TURBO,
-        base_model="Tongyi-MAI/Z-Image-Turbo",
+        model_type=ModelType.ZIMAGE,
+        base_model="Tongyi-MAI/Z-Image",
         resolution_divisor=32,
-        default_steps=8,
-        default_guidance_scale=1.0,
+        default_steps=30,
+        default_guidance_scale=4.0,
     )
 
     def _load_pipeline(self):
-        """Load Z-Image Turbo pipeline."""
+        """Load Z-Image pipeline."""
         try:
-            from diffusers import ZImagePipeline
+            from diffusers import ZImagePipeline as DiffusersZImagePipeline
+            from diffusers import FlowMatchEulerDiscreteScheduler
         except ImportError as e:
             raise ImportError(
                 f"ZImagePipeline requires latest diffusers. "
                 f"Please upgrade: pip install diffusers --upgrade. Error: {e}"
             )
 
-        self.pipe = ZImagePipeline.from_pretrained(
+        self.pipe = DiffusersZImagePipeline.from_pretrained(
             self.CONFIG.base_model,
             torch_dtype=self.dtype,
             token=self.hf_token,
         )
+
+        self.pipe.scheduler = FlowMatchEulerDiscreteScheduler(**SCHEDULER_CONFIG)
 
     def _run_inference(
         self,
@@ -57,7 +67,7 @@ class ZImageTurboPipeline(BasePipeline):
         num_frames: int = 1,
         fps: int = 16,
     ) -> Dict[str, Any]:
-        """Run Z-Image Turbo inference."""
+        """Run Z-Image inference."""
         result = self.pipe(
             prompt=prompt,
             height=height,

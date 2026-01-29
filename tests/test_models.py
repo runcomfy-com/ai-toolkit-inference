@@ -43,6 +43,7 @@ class TestModelType:
             "sdxl",
             "qwen_image",
             "qwen_image_edit",
+            "zimage",
             "zimage_turbo",
             "zimage_deturbo",
             "wan21_14b",
