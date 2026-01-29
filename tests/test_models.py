@@ -35,6 +35,8 @@ class TestModelType:
             "flux_kontext",
             "flux2",
             "flux2_diffusers",
+            "flux2_klein_4b",
+            "flux2_klein_9b",
             "flex1",
             "flex2",
             "sd15",

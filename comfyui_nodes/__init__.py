@@ -5,6 +5,8 @@ from .rc_models import (
     RCFluxDev,
     RCFluxKontext,
     RCFlux2,
+    RCFlux2Klein4B,
+    RCFlux2Klein9B,
     RCFlex1,
     RCFlex2,
     RCSD15,
@@ -38,6 +40,8 @@ NODE_CLASS_MAPPINGS = {
     "RCFluxDev": RCFluxDev,
     "RCFluxKontext": RCFluxKontext,
     "RCFlux2": RCFlux2,
+    "RCFlux2Klein4B": RCFlux2Klein4B,
+    "RCFlux2Klein9B": RCFlux2Klein9B,
 
     # Flex
     "RCFlex1": RCFlex1,
@@ -79,6 +83,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCFluxDev": "RC FLUX.1-dev",
     "RCFluxKontext": "RC FLUX Kontext",
     "RCFlux2": "RC FLUX.2",
+    "RCFlux2Klein4B": "RC FLUX.2-klein 4B",
+    "RCFlux2Klein9B": "RC FLUX.2-klein 9B",
 
     "RCFlex1": "RC Flex.1-alpha",
     "RCFlex2": "RC Flex.2",

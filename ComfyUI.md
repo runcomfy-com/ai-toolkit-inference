@@ -117,6 +117,8 @@ They expose `num_frames` and `fps` as optional inputs.
   - `RCFluxDev`
   - `RCFluxKontext`
   - `RCFlux2`
+  - `RCFlux2Klein4B`
+  - `RCFlux2Klein9B`
 - Flex:
   - `RCFlex1`
   - `RCFlex2`

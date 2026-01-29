@@ -14,6 +14,7 @@ from .flux_dev import FluxDevPipeline
 from .flux_kontext import FluxKontextPipeline
 from .flux2 import Flux2Pipeline
 from .flux2_diffusers import Flux2DiffusersPipeline
+from .flux2_klein import Flux2Klein4BPipeline, Flux2Klein9BPipeline
 
 # Flex family
 from .flex1_alpha import Flex1AlphaPipeline
@@ -76,6 +77,8 @@ PIPELINE_REGISTRY: dict[ModelType, Type[BasePipeline]] = {
     ModelType.FLUX_KONTEXT: FluxKontextPipeline,
     ModelType.FLUX2: Flux2Pipeline,
     ModelType.FLUX2_DIFFUSERS: Flux2DiffusersPipeline,
+    ModelType.FLUX2_KLEIN_4B: Flux2Klein4BPipeline,
+    ModelType.FLUX2_KLEIN_9B: Flux2Klein9BPipeline,
     # Flex family
     ModelType.FLEX1: Flex1AlphaPipeline,
     ModelType.FLEX2: Flex2Pipeline,
@@ -141,6 +144,8 @@ __all__ = [
     "FluxKontextPipeline",
     "Flux2Pipeline",
     "Flux2DiffusersPipeline",
+    "Flux2Klein4BPipeline",
+    "Flux2Klein9BPipeline",
     # Flex family
     "Flex1AlphaPipeline",
     "Flex2Pipeline",

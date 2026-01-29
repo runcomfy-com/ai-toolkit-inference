@@ -19,6 +19,8 @@ class ModelType(str, Enum):
     FLUX_KONTEXT = "flux_kontext"
     FLUX2 = "flux2"
     FLUX2_DIFFUSERS = "flux2_diffusers"
+    FLUX2_KLEIN_4B = "flux2_klein_4b"
+    FLUX2_KLEIN_9B = "flux2_klein_9b"
 
     # Flex family
     FLEX1 = "flex1"
