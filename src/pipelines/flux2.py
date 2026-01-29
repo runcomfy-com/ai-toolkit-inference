@@ -50,11 +50,18 @@ class Flux2Pipeline(BasePipeline):
     CONFIG = PipelineConfig(
         model_type=ModelType.FLUX2,
         base_model="black-forest-labs/FLUX.2-dev",
-        resolution_divisor=32,
+        resolution_divisor=16,
         default_steps=25,
         default_guidance_scale=4.0,
         lora_merge_method=LoraMergeMethod.CUSTOM,  # Manual LoRA merge with hotswap
     )
+
+    # Model/pipeline variants (overridden by Klein subclasses)
+    TRANSFORMER_FILENAME = "flux2-dev.safetensors"
+    TEXT_ENCODER_REPO = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+    TEXT_ENCODER_TYPE = "mistral"  # "mistral" or "qwen"
+    VAE_REPO = None  # Optional separate VAE repo (defaults to base model)
+    IS_GUIDANCE_DISTILLED = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -68,6 +75,10 @@ class Flux2Pipeline(BasePipeline):
         self._original_transformer_state: Optional[Dict[str, torch.Tensor]] = None
         # Timing details for pipeline loading
         self.timings: Dict[str, float] = {}
+
+    def _get_flux2_params(self):
+        from extensions_built_in.diffusion_models.flux2.src.model import Flux2Params
+        return Flux2Params()
 
     def load(self, lora_paths: list, lora_scale: float = 1.0):
         """Load the FLUX.2 pipeline with LoRA merged."""
@@ -102,12 +113,11 @@ class Flux2Pipeline(BasePipeline):
         try:
             from safetensors.torch import load_file
             import huggingface_hub
-            from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
             # Try to import ai-toolkit components
             try:
                 from extensions_built_in.diffusion_models.flux2.src.pipeline import Flux2Pipeline as AITKFlux2Pipeline
-                from extensions_built_in.diffusion_models.flux2.src.model import Flux2, Flux2Params
+                from extensions_built_in.diffusion_models.flux2.src.model import Flux2
                 from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams
                 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
                 from toolkit.util.quantize import quantize, get_qtype
@@ -122,17 +132,16 @@ class Flux2Pipeline(BasePipeline):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            mistral_path = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
             base_model_path = self.CONFIG.base_model
 
             # 1. Load Transformer
             t_start = time.perf_counter()
             logger.info("Loading FLUX.2 Transformer")
             with torch.device("meta"):
-                transformer = Flux2(Flux2Params())
+                transformer = Flux2(self._get_flux2_params())
 
             # Download transformer weights
-            transformer_filename = "flux2-dev.safetensors"
+            transformer_filename = self.TRANSFORMER_FILENAME
             transformer_path = huggingface_hub.hf_hub_download(
                 repo_id=base_model_path,
                 filename=transformer_filename,
@@ -187,8 +196,9 @@ class Flux2Pipeline(BasePipeline):
                 vae = AutoEncoder(AutoEncoderParams())
 
             vae_filename = "ae.safetensors"
+            vae_repo = self.VAE_REPO or base_model_path
             vae_path = huggingface_hub.hf_hub_download(
-                repo_id=base_model_path,
+                repo_id=vae_repo,
                 filename=vae_filename,
                 token=self.hf_token,
             )
@@ -209,12 +219,26 @@ class Flux2Pipeline(BasePipeline):
 
             # 4. Load Text Encoder
             t_start = time.perf_counter()
-            logger.info(f"Loading Mistral Text Encoder: {mistral_path}")
-            text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
-                mistral_path,
-                torch_dtype=self.dtype,
-                token=self.hf_token,
-            )
+            if self.TEXT_ENCODER_TYPE == "mistral":
+                from transformers import AutoProcessor, Mistral3ForConditionalGeneration
+
+                logger.info(f"Loading Mistral Text Encoder: {self.TEXT_ENCODER_REPO}")
+                text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+                    self.TEXT_ENCODER_REPO,
+                    torch_dtype=self.dtype,
+                    token=self.hf_token,
+                )
+            elif self.TEXT_ENCODER_TYPE == "qwen":
+                from transformers import Qwen3ForCausalLM
+
+                logger.info(f"Loading Qwen3 Text Encoder: {self.TEXT_ENCODER_REPO}")
+                text_encoder = Qwen3ForCausalLM.from_pretrained(
+                    self.TEXT_ENCODER_REPO,
+                    torch_dtype=self.dtype,
+                    token=self.hf_token,
+                )
+            else:
+                raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
             self.timings["load_text_encoder"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_text_encoder: {self.timings['load_text_encoder']:.3f}s")
 
@@ -232,10 +256,22 @@ class Flux2Pipeline(BasePipeline):
             logger.info(f"[TIMING] text_encoder: {self.timings['text_encoder']:.3f}s")
 
             # 6. Load Tokenizer
-            tokenizer = AutoProcessor.from_pretrained(
-                mistral_path,
-                token=self.hf_token,
-            )
+            if self.TEXT_ENCODER_TYPE == "mistral":
+                from transformers import AutoProcessor
+
+                tokenizer = AutoProcessor.from_pretrained(
+                    self.TEXT_ENCODER_REPO,
+                    token=self.hf_token,
+                )
+            elif self.TEXT_ENCODER_TYPE == "qwen":
+                from transformers import Qwen2Tokenizer
+
+                tokenizer = Qwen2Tokenizer.from_pretrained(
+                    self.TEXT_ENCODER_REPO,
+                    token=self.hf_token,
+                )
+            else:
+                raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
 
             # 7. Create Scheduler
             scheduler = CustomFlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER_CONFIG)
@@ -248,6 +284,8 @@ class Flux2Pipeline(BasePipeline):
                 text_encoder=text_encoder,
                 tokenizer=tokenizer,
                 transformer=transformer,
+                text_encoder_type=self.TEXT_ENCODER_TYPE,
+                is_guidance_distilled=self.IS_GUIDANCE_DISTILLED,
             )
 
             self.transformer = transformer
@@ -482,8 +520,9 @@ class Flux2Pipeline(BasePipeline):
         fps: int = 16,
     ) -> Dict[str, Any]:
         """Run FLUX.2 inference (exact same as original)."""
-        if negative_prompt:
-            logger.warning("FLUX.2 does not support negative prompts, ignoring")
+        negative_prompt = negative_prompt or ""
+        if self.IS_GUIDANCE_DISTILLED and negative_prompt:
+            logger.warning("FLUX.2 is guidance-distilled; negative_prompt will be ignored")
 
         # Build control_img_list from control_image/control_images
         control_img_list = []
@@ -501,6 +540,7 @@ class Flux2Pipeline(BasePipeline):
         # Keep exact same call signature as original
         result = self.pipe(
             prompt=prompt,
+            negative_prompt=negative_prompt,
             width=width,
             height=height,
             num_inference_steps=num_inference_steps,

@@ -39,6 +39,8 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 |---|---|---|---|
 | [FLUX (FLUX.1-dev)](flux/) | `flux` | `black-forest-labs/FLUX.1-dev` | Pipeline file is named `flux_dev.py`, but the API model id is `flux`. |
 | [FLUX.2 (FLUX.2-dev)](flux2/) | `flux2` | `black-forest-labs/FLUX.2-dev` | Uses AI Toolkit components and merges LoRA into the transformer at load time (scale is not dynamically adjustable). |
+| [FLUX.2-klein 4B](flux2-klein-4b/) | `flux2_klein_4b` | `black-forest-labs/FLUX.2-klein-base-4B` | Uses AI Toolkit components + Qwen3 text encoder; CFG/negative prompt are active. |
+| [FLUX.2-klein 9B](flux2-klein-9b/) | `flux2_klein_9b` | `black-forest-labs/FLUX.2-klein-base-9B` | Uses AI Toolkit components + Qwen3 text encoder; CFG/negative prompt are active. |
 | [Flex.1 (alpha)](flex1/) | `flex1` | `ostris/Flex.1-alpha` | Implemented on top of `diffusers.FluxPipeline` (same family as FLUX.1-dev). |
 | [Flex.2](flex2/) | `flex2` | `ostris/Flex.2-preview` | Uses `fuse_lora` (weights are merged), so LoRA scale is fixed after load; changing `loras[].network_multiplier` requires reload. |
 | [SDXL 1.0](sdxl/) | `sdxl` | `stabilityai/stable-diffusion-xl-base-1.0` | Uses a DDPMScheduler config aligned to AI Toolkit defaults. |

@@ -363,6 +363,28 @@ class RCFlux2(_RCAitkBase):
         return Flux2Pipeline
 
 
+class RCFlux2Klein4B(_RCAitkBase):
+    MODEL_ID = "flux2_klein_4b"
+    DISPLAY_NAME = "RC FLUX.2-klein 4B"
+    DEFAULT_STEPS = 25
+    DEFAULT_GUIDANCE = 4.0
+
+    def _pipeline_ctor(self):
+        from src.pipelines.flux2_klein import Flux2Klein4BPipeline
+        return Flux2Klein4BPipeline
+
+
+class RCFlux2Klein9B(_RCAitkBase):
+    MODEL_ID = "flux2_klein_9b"
+    DISPLAY_NAME = "RC FLUX.2-klein 9B"
+    DEFAULT_STEPS = 25
+    DEFAULT_GUIDANCE = 4.0
+
+    def _pipeline_ctor(self):
+        from src.pipelines.flux2_klein import Flux2Klein9BPipeline
+        return Flux2Klein9BPipeline
+
+
 class RCFlex1(_RCAitkBase):
     MODEL_ID = "flex1"
     DISPLAY_NAME = "RC Flex.1-alpha"

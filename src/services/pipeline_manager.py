@@ -631,9 +631,38 @@ class PipelineManager:
                 "transformer_2/*",
             ]
 
+        # FLUX.2: only download required weights
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-dev":
+            fp16_patterns = ["flux2-dev.safetensors", "ae.safetensors"]
+
+        # FLUX.2-klein: only download required transformer weights
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-4B":
+            fp16_patterns = ["flux-2-klein-base-4b.safetensors"]
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-9B":
+            fp16_patterns = ["flux-2-klein-base-9b.safetensors"]
+
         if not ignore_patterns:
             ignore_patterns = None
         return fp16_patterns, ignore_patterns
+
+    def _get_extra_downloads(self, pipeline_config: Any) -> List[Dict[str, Any]]:
+        """Return extra repos to download (e.g., text encoders / VAEs)."""
+        extras: List[Dict[str, Any]] = []
+
+        # FLUX.2 uses Mistral text encoder
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-dev":
+            extras.append({"repo_id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503"})
+
+        # FLUX.2-klein uses Qwen3 text encoder + shared VAE repo
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-4B":
+            extras.append({"repo_id": "Qwen/Qwen3-4B"})
+            extras.append({"repo_id": "ai-toolkit/flux2_vae", "allow_patterns": ["ae.safetensors"]})
+
+        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-9B":
+            extras.append({"repo_id": "Qwen/Qwen3-8B"})
+            extras.append({"repo_id": "ai-toolkit/flux2_vae", "allow_patterns": ["ae.safetensors"]})
+
+        return extras
 
     def _download_all_parallel(
         self,
@@ -644,6 +673,7 @@ class PipelineManager:
     ) -> Tuple[float, List[str]]:
         """Download base model and LoRA URLs in parallel."""
         fp16_patterns, ignore_patterns = self._get_download_patterns(pipeline_config)
+        extra_downloads = self._get_extra_downloads(pipeline_config)
 
         # Check if there are any URLs
         has_lora_urls = (
@@ -662,13 +692,20 @@ class PipelineManager:
             )
             if pipeline_config.transformer_model:
                 download_time += self._download_model_if_needed(pipeline_config.transformer_model, hf_token)
+            for extra in extra_downloads:
+                download_time += self._download_model_if_needed(
+                    extra["repo_id"],
+                    hf_token,
+                    allow_patterns=extra.get("allow_patterns"),
+                    ignore_patterns=extra.get("ignore_patterns"),
+                )
             return download_time, lora_paths
 
         # Parallel download
         logger.info("Starting parallel download: base model + LoRA URLs...")
         start = time.perf_counter()
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=3 + len(extra_downloads)) as executor:
             base_future = executor.submit(
                 self._download_model_if_needed,
                 pipeline_config.base_model,
@@ -688,10 +725,23 @@ class PipelineManager:
                 else None
             )
             lora_future = executor.submit(self._resolve_lora_paths, lora_paths)
+            extra_futures = [
+                executor.submit(
+                    self._download_model_if_needed,
+                    extra["repo_id"],
+                    hf_token,
+                    3600,
+                    2,
+                    extra.get("allow_patterns"),
+                    extra.get("ignore_patterns"),
+                )
+                for extra in extra_downloads
+            ]
 
             base_time = base_future.result()
             trans_time = trans_future.result() if trans_future else 0.0
             resolved_paths, lora_time = lora_future.result()
+            extra_times = [f.result() for f in extra_futures] if extra_futures else []
 
         wall_time = time.perf_counter() - start
 
@@ -701,11 +751,13 @@ class PipelineManager:
                 timings["download_transformer"] = trans_time
             if lora_time > 0:
                 timings["download_lora"] = lora_time
+            if extra_times:
+                timings["download_extra_models"] = sum(extra_times)
             timings["download_wall_time"] = wall_time
 
         logger.info(f"[TIMING] Parallel download: base={base_time:.1f}s, lora={lora_time:.1f}s, wall={wall_time:.1f}s")
 
-        return base_time + trans_time, resolved_paths
+        return base_time + trans_time + (sum(extra_times) if extra_times else 0.0), resolved_paths
 
     def _load_pipeline(
         self,
