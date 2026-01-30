@@ -616,6 +616,28 @@ class Wan22I2V14BPipeline(BasePipeline):
             generator=generator,
         )
 
+        extra_kwargs = {}
+        # Fix for torch.compile + cudagraph_trees "overwritten by a subsequent run"
+        # when multiple compiled regions are invoked within one denoising iteration.
+        if getattr(self, "_compiled", False) and torch.cuda.is_available():
+            if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                import inspect
+
+                # Mark iteration begin for step 0 (before the first denoising step runs)
+                torch.compiler.cudagraph_mark_step_begin()
+
+                def _cg_step_end_callback(pipe, step_index, timestep, callback_kwargs):
+                    # Mark iteration begin for the *next* step
+                    torch.compiler.cudagraph_mark_step_begin()
+                    return callback_kwargs
+
+                sig = inspect.signature(self.pipe.__call__)
+                if "callback_on_step_end" in sig.parameters:
+                    extra_kwargs["callback_on_step_end"] = _cg_step_end_callback
+                if "callback_on_step_end_tensor_inputs" in sig.parameters:
+                    # We don't need tensors, just the hook
+                    extra_kwargs["callback_on_step_end_tensor_inputs"] = []
+
         # Run inference
         result = self.pipe(
             prompt=prompt,
@@ -628,6 +650,7 @@ class Wan22I2V14BPipeline(BasePipeline):
             latents=conditioned_latent,  # With first frame conditioning
             generator=generator,
             output_type="pil",
+            **extra_kwargs,
         )
 
         frames = result.frames[0] if hasattr(result, "frames") else result.images
