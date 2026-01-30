@@ -12,10 +12,32 @@ from urllib.parse import urlparse
 
 import requests
 
-from ..pipelines import get_pipeline_class, get_pipeline_config
+from ..pipelines import get_pipeline_class, get_pipeline_config, PIPELINE_REGISTRY
 from ..libs.url_utils import normalize_huggingface_file_url, looks_like_html_file
+from .download_config import ExtraDownload, get_download_config
 
 logger = logging.getLogger(__name__)
+
+
+def _build_filtered_repo_ids() -> set[str]:
+    """
+    Repos that are downloaded with filters (allow/ignore) for any model type.
+
+    If a repo can be partially downloaded, we avoid cache short-circuit for full downloads
+    to ensure missing files are fetched when needed.
+    """
+    repo_ids: set[str] = set()
+    for model_type, pipeline_cls in PIPELINE_REGISTRY.items():
+        config = get_download_config(model_type)
+        if config.allow_patterns or config.ignore_patterns:
+            repo_ids.add(pipeline_cls.CONFIG.base_model)
+        for extra in config.extras:
+            if extra.allow_patterns or extra.ignore_patterns:
+                repo_ids.add(extra.repo_id)
+    return repo_ids
+
+
+FILTERED_REPO_IDS = _build_filtered_repo_ids()
 
 
 def is_url(path: str) -> bool:
@@ -500,16 +522,20 @@ class PipelineManager:
         # Enable faster transfer backend if available
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
         # Progress bars are enabled in the download subprocess
+        allow_patterns = allow_patterns or None
+        ignore_patterns = ignore_patterns or None
 
         # More robust cache check using scan_cache_dir
-        try:
-            cache_info = scan_cache_dir()
-            for repo in cache_info.repos:
-                if repo.repo_id == repo_id:
-                    logger.info(f"Model {repo_id} already in cache ({repo.size_on_disk_str})")
-                    return 0.0
-        except Exception as e:
-            logger.debug(f"Cache check failed: {e}, proceeding with download check")
+        use_cache_check = allow_patterns is None and ignore_patterns is None and repo_id not in FILTERED_REPO_IDS
+        if use_cache_check:
+            try:
+                cache_info = scan_cache_dir()
+                for repo in cache_info.repos:
+                    if repo.repo_id == repo_id:
+                        logger.info(f"Model {repo_id} already in cache ({repo.size_on_disk_str})")
+                        return 0.0
+            except Exception as e:
+                logger.debug(f"Cache check failed: {e}, proceeding with download check")
 
         # Download with timeout and retry
         logger.info(f"Downloading model {repo_id}...")
@@ -604,65 +630,12 @@ class PipelineManager:
 
     def _get_download_patterns(self, pipeline_config: Any) -> Tuple[Optional[List[str]], Optional[List[str]]]:
         """Get allow/ignore patterns for model download."""
-        fp16_patterns = None
-        ignore_patterns: List[str] = []
+        download_config = get_download_config(pipeline_config.model_type)
+        return download_config.allow_patterns, download_config.ignore_patterns
 
-        # SD15/SDXL have fp16 variants
-        if pipeline_config.base_model in [
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            "stable-diffusion-v1-5/stable-diffusion-v1-5",
-        ]:
-            fp16_patterns = ["*.fp16.safetensors", "*.json", "*.txt", "*.model", "tokenizer*"]
-
-        # LTX-2 ignore patterns
-        if "ltx-2" in pipeline_config.base_model.lower():
-            ignore_patterns += [
-                "ltx-2-*.safetensors",
-                "latent_upsampler/*",
-                "*.mp4",
-                "*.gguf",
-                "text_encoder/diffusion_pytorch_model*",
-            ]
-
-        # Wan 2.2 T2V base model: we replace transformers from a separate repo.
-        if pipeline_config.base_model == "Wan-AI/Wan2.2-T2V-A14B-Diffusers":
-            ignore_patterns += [
-                "transformer/*",
-                "transformer_2/*",
-            ]
-
-        # FLUX.2: only download required weights
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-dev":
-            fp16_patterns = ["flux2-dev.safetensors", "ae.safetensors"]
-
-        # FLUX.2-klein: only download required transformer weights
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-4B":
-            fp16_patterns = ["flux-2-klein-base-4b.safetensors"]
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-9B":
-            fp16_patterns = ["flux-2-klein-base-9b.safetensors"]
-
-        if not ignore_patterns:
-            ignore_patterns = None
-        return fp16_patterns, ignore_patterns
-
-    def _get_extra_downloads(self, pipeline_config: Any) -> List[Dict[str, Any]]:
+    def _get_extra_downloads(self, pipeline_config: Any) -> List[ExtraDownload]:
         """Return extra repos to download (e.g., text encoders / VAEs)."""
-        extras: List[Dict[str, Any]] = []
-
-        # FLUX.2 uses Mistral text encoder
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-dev":
-            extras.append({"repo_id": "mistralai/Mistral-Small-3.1-24B-Instruct-2503"})
-
-        # FLUX.2-klein uses Qwen3 text encoder + shared VAE repo
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-4B":
-            extras.append({"repo_id": "Qwen/Qwen3-4B"})
-            extras.append({"repo_id": "ai-toolkit/flux2_vae", "allow_patterns": ["ae.safetensors"]})
-
-        if pipeline_config.base_model == "black-forest-labs/FLUX.2-klein-base-9B":
-            extras.append({"repo_id": "Qwen/Qwen3-8B"})
-            extras.append({"repo_id": "ai-toolkit/flux2_vae", "allow_patterns": ["ae.safetensors"]})
-
-        return extras
+        return get_download_config(pipeline_config.model_type).extras
 
     def _download_all_parallel(
         self,
@@ -694,10 +667,10 @@ class PipelineManager:
                 download_time += self._download_model_if_needed(pipeline_config.transformer_model, hf_token)
             for extra in extra_downloads:
                 download_time += self._download_model_if_needed(
-                    extra["repo_id"],
+                    extra.repo_id,
                     hf_token,
-                    allow_patterns=extra.get("allow_patterns"),
-                    ignore_patterns=extra.get("ignore_patterns"),
+                    allow_patterns=extra.allow_patterns,
+                    ignore_patterns=extra.ignore_patterns,
                 )
             return download_time, lora_paths
 
@@ -728,12 +701,12 @@ class PipelineManager:
             extra_futures = [
                 executor.submit(
                     self._download_model_if_needed,
-                    extra["repo_id"],
+                    extra.repo_id,
                     hf_token,
                     3600,
                     2,
-                    extra.get("allow_patterns"),
-                    extra.get("ignore_patterns"),
+                    extra.allow_patterns,
+                    extra.ignore_patterns,
                 )
                 for extra in extra_downloads
             ]
@@ -758,6 +731,38 @@ class PipelineManager:
         logger.info(f"[TIMING] Parallel download: base={base_time:.1f}s, lora={lora_time:.1f}s, wall={wall_time:.1f}s")
 
         return base_time + trans_time + (sum(extra_times) if extra_times else 0.0), resolved_paths
+
+    def predownload_pipeline_assets(self, pipeline_config: Any, hf_token: Optional[str] = None) -> float:
+        """
+        Pre-download base model, optional transformer, and any extra repos for a pipeline config.
+
+        Returns:
+            Total download time in seconds (0.0 if already cached).
+        """
+        download_config = get_download_config(pipeline_config.model_type)
+        total_time = self._download_model_if_needed(
+            pipeline_config.base_model,
+            hf_token,
+            allow_patterns=download_config.allow_patterns,
+            ignore_patterns=download_config.ignore_patterns,
+        )
+        if pipeline_config.transformer_model:
+            total_time += self._download_model_if_needed(pipeline_config.transformer_model, hf_token)
+        for extra in download_config.extras:
+            total_time += self._download_model_if_needed(
+                extra.repo_id,
+                hf_token,
+                allow_patterns=extra.allow_patterns,
+                ignore_patterns=extra.ignore_patterns,
+            )
+        return total_time
+
+    def predownload_model(self, model: str, hf_token: Optional[str] = None) -> float:
+        """Pre-download assets for a model type string (e.g., 'flux2')."""
+        pipeline_config = get_pipeline_config(model)
+        if not pipeline_config:
+            raise ValueError(f"Unknown model: {model}")
+        return self.predownload_pipeline_assets(pipeline_config, hf_token)
 
     def _load_pipeline(
         self,
