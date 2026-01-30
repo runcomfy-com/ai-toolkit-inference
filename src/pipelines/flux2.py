@@ -304,8 +304,24 @@ class Flux2Pipeline(BasePipeline):
             raise
 
     def _merge_lora_to_transformer(self, transformer, lora_path: str, lora_scale: float = 1.0):
-        """Merge LoRA weights into transformer (exact same logic as original)."""
+        """Merge LoRA weights into transformer (GPU addmm)."""
         from safetensors.torch import load_file
+
+        # Ensure merge happens on GPU when available
+        try:
+            param_device = next(transformer.parameters()).device
+        except StopIteration:
+            param_device = torch.device("cpu")
+        if param_device.type != "cuda":
+            logger.info("Moving transformer to GPU for LoRA merge")
+            transformer.to(self.device, dtype=self.dtype)
+            transformer.eval()
+            try:
+                param_device = next(transformer.parameters()).device
+            except StopIteration:
+                param_device = torch.device("cpu")
+        logger.info(f"LoRA merge device: {param_device}")
+        # TODO: If OOMs appear in smaller GPUs, consider chunked merge or reintroduce periodic cache clears behind a flag.
 
         lora_state_dict = load_file(lora_path, device="cpu")
         logger.info(f"Loaded LoRA file with {len(lora_state_dict)} keys")
@@ -319,6 +335,12 @@ class Flux2Pipeline(BasePipeline):
         for key, value in lora_state_dict.items():
             new_key = key.replace("diffusion_model.", "")
             converted_sd[new_key] = value.to(self.dtype)
+
+        # Move LoRA tensors to merge device once (avoid per-layer CPU->GPU transfers)
+        if param_device.type == "cuda":
+            for key, value in converted_sd.items():
+                if isinstance(value, torch.Tensor) and value.device.type != "cuda":
+                    converted_sd[key] = value.to(device=param_device, dtype=self.dtype, non_blocking=True)
 
         # Log first few keys after conversion
         converted_keys_sample = list(converted_sd.keys())[:5]
@@ -341,10 +363,9 @@ class Flux2Pipeline(BasePipeline):
         transformer_keys_sample = list(transformer.state_dict().keys())[:5]
         logger.info(f"Sample transformer keys: {transformer_keys_sample}")
 
-        # Merge LoRA weights (exact same logic as original)
+        # Manual merge (GPU-friendly): W += scale * (B @ A)
         transformer_state = transformer.state_dict()
         merged_count = 0
-
         for key in list(converted_sd.keys()):
             if "lora_A.weight" in key:
                 base_key = key.replace(".lora_A.weight", "")
@@ -357,23 +378,26 @@ class Flux2Pipeline(BasePipeline):
                     if weight_key in transformer_state:
                         lora_a = converted_sd[lora_a_key]
                         lora_b = converted_sd[lora_b_key]
-                        delta = lora_b @ lora_a
 
                         alpha_key = base_key + ".alpha"
-                        alpha = converted_sd.get(alpha_key, torch.tensor(rank)).item()
+                        alpha_val = converted_sd.get(alpha_key, None)
+                        if alpha_val is None:
+                            alpha = rank
+                        else:
+                            alpha = alpha_val.item() if isinstance(alpha_val, torch.Tensor) else float(alpha_val)
+
                         # Apply both internal scale (alpha/rank) and external lora_scale
                         scale = (alpha / rank) * lora_scale
 
                         original_weight = transformer_state[weight_key]
-                        # Use in-place add to avoid allocating extra GPU memory
-                        original_weight.add_(delta.to(original_weight.device, original_weight.dtype), alpha=scale)
-                        merged_count += 1
+                        device = original_weight.device
+                        dtype = original_weight.dtype
+                        lora_a = lora_a.to(device=device, dtype=dtype, non_blocking=True)
+                        lora_b = lora_b.to(device=device, dtype=dtype, non_blocking=True)
 
-                        # Periodically clear cache to avoid OOM during hotswap
-                        if merged_count % 20 == 0:
-                            gc.collect()
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
+                        # In-place: W = W + scale * (B @ A)
+                        original_weight.addmm_(lora_b, lora_a, beta=1.0, alpha=scale)
+                        merged_count += 1
 
         transformer.load_state_dict(transformer_state, assign=True)
         logger.info(f"Merged {merged_count} LoRA layers with scale={lora_scale}")
