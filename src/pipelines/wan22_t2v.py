@@ -205,12 +205,23 @@ class Wan22T2V14BPipeline(BasePipeline):
         high_path = lora_config.get("high")
         low_path = lora_config.get("low")
 
-        adapter_names = []
+        has_high = bool(high_path)
+        has_low = bool(low_path)
+        if not has_high and not has_low:
+            raise ValueError("Wan 2.2 14B requires at least one LoRA path")
 
-        # Load high_noise LoRA -> transformer (default)
-        if high_path:
-            high_dir = os.path.dirname(high_path)
-            high_file = os.path.basename(high_path)
+        fallback_path = high_path or low_path
+        high_load_path = high_path or fallback_path
+        low_load_path = low_path or fallback_path
+
+        adapter_names = ["high_noise", "low_noise"]
+
+        # Load high_noise LoRA -> transformer (default). Use placeholder if missing.
+        if not has_high:
+            logger.info("No high_noise LoRA provided; loading placeholder and setting scale=0")
+        if high_load_path:
+            high_dir = os.path.dirname(high_load_path)
+            high_file = os.path.basename(high_load_path)
             logger.info(f"Loading high_noise LoRA: {high_file}")
             step_start = time.perf_counter()
             self.pipe.load_lora_weights(
@@ -220,12 +231,13 @@ class Wan22T2V14BPipeline(BasePipeline):
                 local_files_only=True,
             )
             self.timings["load_high_lora"] = time.perf_counter() - step_start
-            adapter_names.append("high_noise")
 
-        # Load low_noise LoRA -> transformer_2
-        if low_path:
-            low_dir = os.path.dirname(low_path)
-            low_file = os.path.basename(low_path)
+        # Load low_noise LoRA -> transformer_2. Use placeholder if missing.
+        if not has_low:
+            logger.info("No low_noise LoRA provided; loading placeholder and setting scale=0")
+        if low_load_path:
+            low_dir = os.path.dirname(low_load_path)
+            low_file = os.path.basename(low_load_path)
             logger.info(f"Loading low_noise LoRA: {low_file} (load_into_transformer_2=True)")
             step_start = time.perf_counter()
             self.pipe.load_lora_weights(
@@ -236,18 +248,25 @@ class Wan22T2V14BPipeline(BasePipeline):
                 load_into_transformer_2=True,
             )
             self.timings["load_low_lora"] = time.perf_counter() - step_start
-            adapter_names.append("low_noise")
 
         self._adapter_names = adapter_names
         self._current_lora_paths = lora_paths
 
         if self.CONFIG.lora_merge_method == LoraMergeMethod.FUSE:
-            high_scale = lora_scale.get("high", 1.0) if isinstance(lora_scale, dict) else lora_scale
-            low_scale = lora_scale.get("low", 1.0) if isinstance(lora_scale, dict) else lora_scale
+            if isinstance(lora_scale, dict):
+                high_scale = lora_scale.get("high", 1.0)
+                low_scale = lora_scale.get("low", 1.0)
+            else:
+                high_scale = lora_scale
+                low_scale = lora_scale
+            if not has_high:
+                high_scale = 0.0
+            if not has_low:
+                low_scale = 0.0
             logger.info(f"Fusing dual LoRA with scale={{'high': {high_scale}, 'low': {low_scale}}}")
             # Wan LoRA fuse defaults to components=['transformer'].
             # For dual-denoiser Wan2.2, fuse transformer_2 explicitly when low_noise was loaded into transformer_2.
-            if high_path:
+            if has_high and high_scale != 0.0:
                 step_start = time.perf_counter()
                 self.pipe.fuse_lora(
                     adapter_names=["high_noise"],
@@ -255,7 +274,7 @@ class Wan22T2V14BPipeline(BasePipeline):
                     components=["transformer"],
                 )
                 self.timings["fuse_high_lora"] = time.perf_counter() - step_start
-            if low_path:
+            if has_low and low_scale != 0.0:
                 step_start = time.perf_counter()
                 self.pipe.fuse_lora(
                     adapter_names=["low_noise"],
@@ -268,19 +287,23 @@ class Wan22T2V14BPipeline(BasePipeline):
             self.pipe.unload_lora_weights()
             self.timings["unload_lora_weights"] = time.perf_counter() - step_start
             self._lora_fused = True
-            self._num_loras_fused = len(adapter_names)
+            self._num_loras_fused = int(has_high and high_scale != 0.0) + int(has_low and low_scale != 0.0)
             logger.info(f"MoE LoRA fused: {adapter_names} with scale={{'high': {high_scale}, 'low': {low_scale}}}")
         else:
             # SET_ADAPTERS mode: use set_adapters for dynamic control
             if isinstance(lora_scale, dict):
-                adapter_weights = [
-                    lora_scale.get("high", 1.0) if name == "high_noise" else lora_scale.get("low", 1.0)
-                    for name in adapter_names
-                ]
+                high_scale = lora_scale.get("high", 1.0)
+                low_scale = lora_scale.get("low", 1.0)
             else:
-                adapter_weights = [lora_scale] * len(adapter_names)
+                high_scale = lora_scale
+                low_scale = lora_scale
+            if not has_high:
+                high_scale = 0.0
+            if not has_low:
+                low_scale = 0.0
             step_start = time.perf_counter()
-            self.pipe.set_adapters(adapter_names, adapter_weights=adapter_weights)
+            self.pipe.transformer.set_adapters(["high_noise"], [high_scale])
+            self.pipe.transformer_2.set_adapters(["low_noise"], [low_scale])
             self.timings["set_adapters"] = time.perf_counter() - step_start
             self._lora_fused = False
             logger.info(f"MoE LoRA loaded (adapter mode): {adapter_names} with scale={lora_scale}")
@@ -317,15 +340,23 @@ class Wan22T2V14BPipeline(BasePipeline):
             return False
 
         try:
+            current_config = self._current_lora_paths[0] if self._current_lora_paths else {}
+            has_high = bool(current_config.get("high"))
+            has_low = bool(current_config.get("low"))
+
             if isinstance(scale, dict):
-                adapter_weights = [
-                    scale.get("high", 1.0) if name == "high_noise" else scale.get("low", 1.0)
-                    for name in self._adapter_names
-                ]
+                high_scale = scale.get("high", 1.0)
+                low_scale = scale.get("low", 1.0)
             else:
-                # Adapter mode: apply same scale to all adapters
-                adapter_weights = [scale] * len(self._adapter_names)
-            self.pipe.set_adapters(self._adapter_names, adapter_weights=adapter_weights)
+                high_scale = scale
+                low_scale = scale
+            if not has_high:
+                high_scale = 0.0
+            if not has_low:
+                low_scale = 0.0
+
+            self.pipe.transformer.set_adapters(["high_noise"], [high_scale])
+            self.pipe.transformer_2.set_adapters(["low_noise"], [low_scale])
             self._current_lora_scale = scale
             logger.info(f"MoE LoRA scale set to {scale}")
             return True
@@ -370,8 +401,8 @@ class Wan22T2V14BPipeline(BasePipeline):
         # Adapter mode - use hotswap for each adapter
         logger.info("Switching dual LoRA using hotswap")
         try:
-            active_adapters = []
-            active_weights = []
+            if not high_path and not low_path:
+                raise ValueError("No LoRA provided for switch_lora")
 
             # Hotswap high_noise adapter
             if high_path:
@@ -385,8 +416,6 @@ class Wan22T2V14BPipeline(BasePipeline):
                     local_files_only=True,
                     hotswap=True,
                 )
-                active_adapters.append("high_noise")
-                active_weights.append(lora_scale.get("high", 1.0) if isinstance(lora_scale, dict) else lora_scale)
 
             # Hotswap low_noise adapter
             if low_path:
@@ -401,14 +430,21 @@ class Wan22T2V14BPipeline(BasePipeline):
                     load_into_transformer_2=True,
                     hotswap=True,
                 )
-                active_adapters.append("low_noise")
-                active_weights.append(lora_scale.get("low", 1.0) if isinstance(lora_scale, dict) else lora_scale)
 
-            if not active_adapters:
-                raise ValueError("No LoRA provided for switch_lora")
+            if isinstance(lora_scale, dict):
+                high_scale = lora_scale.get("high", 1.0)
+                low_scale = lora_scale.get("low", 1.0)
+            else:
+                high_scale = lora_scale
+                low_scale = lora_scale
+            if not high_path:
+                high_scale = 0.0
+            if not low_path:
+                low_scale = 0.0
 
-            self.pipe.set_adapters(active_adapters, adapter_weights=active_weights)
-            self._adapter_names = active_adapters
+            self.pipe.transformer.set_adapters(["high_noise"], [high_scale])
+            self.pipe.transformer_2.set_adapters(["low_noise"], [low_scale])
+            self._adapter_names = ["high_noise", "low_noise"]
             self._current_lora_scale = lora_scale
             self._current_lora_paths = lora_paths
 
@@ -445,6 +481,28 @@ class Wan22T2V14BPipeline(BasePipeline):
         fps: int = 16,
     ) -> Dict[str, Any]:
         """Run Wan 2.2 T2V inference."""
+        extra_kwargs = {}
+        # Fix for torch.compile + cudagraph_trees "overwritten by a subsequent run"
+        # when multiple compiled regions are invoked within one denoising iteration.
+        if getattr(self, "_compiled", False) and torch.cuda.is_available():
+            if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+                import inspect
+
+                # Mark iteration begin for step 0 (before the first denoising step runs)
+                torch.compiler.cudagraph_mark_step_begin()
+
+                def _cg_step_end_callback(pipe, step_index, timestep, callback_kwargs):
+                    # Mark iteration begin for the *next* step
+                    torch.compiler.cudagraph_mark_step_begin()
+                    return callback_kwargs
+
+                sig = inspect.signature(self.pipe.__call__)
+                if "callback_on_step_end" in sig.parameters:
+                    extra_kwargs["callback_on_step_end"] = _cg_step_end_callback
+                if "callback_on_step_end_tensor_inputs" in sig.parameters:
+                    # We don't need tensors, just the hook
+                    extra_kwargs["callback_on_step_end_tensor_inputs"] = []
+
         result = self.pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -455,6 +513,7 @@ class Wan22T2V14BPipeline(BasePipeline):
             guidance_scale=guidance_scale,
             generator=generator,
             output_type="pil",
+            **extra_kwargs,
         )
 
         frames = result.frames[0] if hasattr(result, "frames") else result.images
