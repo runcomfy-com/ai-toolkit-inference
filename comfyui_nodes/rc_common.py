@@ -130,9 +130,17 @@ def _maybe_download_lora_paths(lora_paths: List[Union[str, Dict[str, str]]]) -> 
 @dataclass(frozen=True)
 class PipelineCacheKey:
     model_id: str
+    pipeline_id: str  # e.g. "module:ClassName" to distinguish different pipeline classes
     hf_token: Optional[str]
     lora_paths_key: Tuple
     lora_scale_key: Union[float, Tuple[Tuple[str, float], ...]]
+
+
+def _get_pipeline_id(pipeline_ctor) -> str:
+    """Get a unique identifier for a pipeline class/constructor."""
+    if hasattr(pipeline_ctor, "__module__") and hasattr(pipeline_ctor, "__name__"):
+        return f"{pipeline_ctor.__module__}:{pipeline_ctor.__name__}"
+    return str(pipeline_ctor)
 
 
 _PIPELINE_CACHE: Dict[str, Any] = {
@@ -152,14 +160,16 @@ def get_or_load_pipeline(
 ) -> Any:
     """Load and cache a single pipeline instance.
 
-    If model/token/lora config changes, unload old pipeline and load new.
+    If model/token/lora/pipeline_class config changes, unload old pipeline and load new.
     """
     global _PIPELINE_CACHE
 
     resolved_loras = _maybe_download_lora_paths(lora_paths)
     scale_value = _normalize_lora_scale_value(lora_scale)
+    pipeline_id = _get_pipeline_id(pipeline_ctor)
     key = PipelineCacheKey(
         model_id=model_id,
+        pipeline_id=pipeline_id,
         hf_token=hf_token or None,
         lora_paths_key=_normalize_lora_paths_for_cache(resolved_loras),
         lora_scale_key=_normalize_lora_scale_for_cache(scale_value),

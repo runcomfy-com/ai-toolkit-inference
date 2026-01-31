@@ -112,6 +112,41 @@ They expose `num_frames` and `fps` as optional inputs.
 
 (Instead of the single `lora_path` / `lora_scale` inputs.)
 
+### Latent workflow nodes (AITK)
+
+For advanced workflows with latent manipulation (upscale + second pass, etc.), use these nodes under `RunComfy-Inference/Workflow`:
+
+- **`RCAITKLoRA`** - Create a LoRA configuration object
+  - Select from ComfyUI's `models/loras` dropdown, or provide a path/URL
+  - Outputs `AITK_LORA` to connect to `RCAITKLoadPipeline`
+
+- **`RCAITKLoadPipeline`** - Load a pipeline with optional LoRA
+  - Supports: SD 1.5, SDXL, Qwen Image, Qwen Image 2512
+  - Outputs `AITK_PIPELINE` for use with sampler/decode nodes
+
+- **`RCAITKSampler`** - Sample latents from the pipeline
+  - Outputs `LATENT` (ComfyUI format) for further processing
+  - Accepts optional input `LATENT` for refinement (img2img style)
+  - `denoise_strength` controls how much to denoise (0.33 for second pass, 1.0 for full generation)
+
+- **`RCAITKDecodeLatent`** - Decode latents to images
+  - Uses the pipeline's VAE to decode `LATENT` → `IMAGE`
+
+- **`RCAITKEncodeImage`** - Encode images to latents
+  - Useful for starting img2img workflows from an existing image
+
+**Typical latent upscale + refine workflow:**
+
+```
+RCAITKLoRA → RCAITKLoadPipeline → RCAITKSampler (1st pass)
+                                        ↓
+                                 LatentUpscale (ComfyUI)
+                                        ↓
+                          RCAITKSampler (denoise=0.33) → RCAITKDecodeLatent → IMAGE
+```
+
+See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
+
 ## Available nodes (class types)
 
 - Z-Image:
@@ -150,6 +185,12 @@ They expose `num_frames` and `fps` as optional inputs.
   - `RCWan22T2V14B`
   - `RCWan22I2V14B`
   - `RCWan22TI2V5B`
+- Latent Workflow (AITK):
+  - `RCAITKLoRA`
+  - `RCAITKLoadPipeline`
+  - `RCAITKSampler`
+  - `RCAITKDecodeLatent`
+  - `RCAITKEncodeImage`
 
 ## Example workflows
 
@@ -162,6 +203,11 @@ Minimal example workflows are provided in `example_workflows/`:
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.
 
+**Latent workflow examples** (upscale + second pass):
+
+- `example_workflows/rc_aitk_sdxl_latent_upscale.json` - SDXL with latent upscale and 0.33 denoise refinement
+- `example_workflows/rc_aitk_qwen2512_latent_upscale.json` - Qwen Image 2512 with latent upscale and refinement
+
 Workflows that require a control image use a `LoadImage` node referencing `aitk_control.png`.
 Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to match your filename).
 
@@ -169,7 +215,8 @@ Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to m
 
 - Node registration: `comfyui_nodes/__init__.py`
 - Node implementations:
-  - `comfyui_nodes/rc_models.py` (all catalog nodes)
+  - `comfyui_nodes/rc_models.py` (all one-shot catalog nodes)
+  - `comfyui_nodes/rc_latent_workflow.py` (AITK latent workflow nodes)
   - `comfyui_nodes/rc_common.py` (shared helpers)
 
 ## Notes / common issues

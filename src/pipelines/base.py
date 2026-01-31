@@ -449,6 +449,9 @@ class BasePipeline(ABC):
         control_images: Optional[List[Image.Image]] = None,
         num_frames: Optional[int] = None,
         fps: Optional[int] = None,
+        output_type: str = "pil",
+        latents: Optional[torch.Tensor] = None,
+        denoise_strength: float = 1.0,
     ) -> Dict[str, Any]:
         """
         Generate image/video.
@@ -465,9 +468,12 @@ class BasePipeline(ABC):
             control_images: Multiple control images (for qwen_image_edit_plus etc.)
             num_frames: Number of frames for video
             fps: Frames per second for video
+            output_type: "pil" for PIL Image, "latent" for raw latent tensor
+            latents: Optional input latents for img2img/refine workflows
+            denoise_strength: Denoising strength (0-1) when using input latents
 
         Returns:
-            Dict with "image" or "frames" key, plus "seed".
+            Dict with "image" or "frames" or "latents" key, plus "seed".
         """
         # Apply defaults from config
         if num_inference_steps is None:
@@ -498,21 +504,44 @@ class BasePipeline(ABC):
 
         logger.info(f"Generating: prompt='{prompt[:50]}...', size={width}x{height}, seed={seed}")
 
-        # Run inference
+        # Run inference - try with output_type/latents support, fall back to basic call
         with torch.inference_mode():
-            result = self._run_inference(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                control_image=control_image,
-                control_images=control_images,
-                num_frames=num_frames,
-                fps=fps,
-            )
+            try:
+                result = self._run_inference(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or "",
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    control_image=control_image,
+                    control_images=control_images,
+                    num_frames=num_frames,
+                    fps=fps,
+                    output_type=output_type,
+                    latents=latents,
+                    denoise_strength=denoise_strength,
+                )
+            except TypeError:
+                # Fallback for pipelines that don't support output_type/latents yet
+                if output_type != "pil" or latents is not None:
+                    raise NotImplementedError(
+                        f"{self.__class__.__name__} does not support output_type='{output_type}' or latents input yet"
+                    )
+                result = self._run_inference(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or "",
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    control_image=control_image,
+                    control_images=control_images,
+                    num_frames=num_frames,
+                    fps=fps,
+                )
 
         # Add seed to result
         result["seed"] = seed
