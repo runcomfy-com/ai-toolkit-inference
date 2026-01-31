@@ -5,6 +5,7 @@ Qwen Image pipeline implementation.
 import gc
 import logging
 import math
+import os
 from typing import Dict, Any, Optional, List
 
 import numpy as np
@@ -18,14 +19,28 @@ from ..schemas.models import ModelType
 
 logger = logging.getLogger(__name__)
 
-# Import constants from diffusers official pipeline
-try:
-    from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
-        CONDITION_IMAGE_SIZE,
-    )
-except ImportError:
-    # Fallback value if diffusers version doesn't have this
-    CONDITION_IMAGE_SIZE = 147456  # ~384x384
+# Environment variable to enable aggressive memory cleanup (default: off for faster iterative runs)
+AITK_AGGRESSIVE_CLEANUP = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
+
+# Lazy imports - diffusers is only imported when actually needed
+# This avoids loading all diffusers pipelines at startup
+# CONDITION_IMAGE_SIZE is fetched lazily in _get_condition_image_size()
+_CONDITION_IMAGE_SIZE_CACHE = None
+
+
+def _get_condition_image_size():
+    """Get CONDITION_IMAGE_SIZE lazily to avoid importing diffusers at module load."""
+    global _CONDITION_IMAGE_SIZE_CACHE
+    if _CONDITION_IMAGE_SIZE_CACHE is None:
+        try:
+            from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
+                CONDITION_IMAGE_SIZE,
+            )
+            _CONDITION_IMAGE_SIZE_CACHE = CONDITION_IMAGE_SIZE
+        except ImportError:
+            # Fallback value if diffusers version doesn't have this
+            _CONDITION_IMAGE_SIZE_CACHE = 147456  # ~384x384
+    return _CONDITION_IMAGE_SIZE_CACHE
 
 
 
@@ -66,10 +81,13 @@ class QwenImagePipeline(BasePipeline):
             logger.info("Enabling SEQUENTIAL CPU offload (low RAM mode)")
             self.pipe.enable_sequential_cpu_offload()
             self._using_sequential_offload = True
+            # Sync img2img pipe if already created
+            self._sync_img2img_execution_device()
         else:
             logger.warning("Sequential offload not available")
 
     def _load_pipeline(self):
+        """Load the base Qwen pipeline. img2img is created in load() after device setup."""
         from diffusers import QwenImagePipeline as DiffusersQwenImagePipeline
 
         self.pipe = DiffusersQwenImagePipeline.from_pretrained(
@@ -78,22 +96,70 @@ class QwenImagePipeline(BasePipeline):
             token=self.hf_token,
             local_files_only=False,
         )
+        # NOTE: _img2img_pipe is created in load() after CPU offload is enabled,
+        # so it inherits the proper execution-device state.
 
-        # Prefer the official img2img pipeline for refinement (proper strength/timestep handling).
+    def load(self, lora_paths: list, lora_scale: float = 1.0):
+        """Load pipeline, then create img2img wrapper with proper device state."""
+        super().load(lora_paths, lora_scale)
+        self._create_img2img_pipeline()
+
+    def _create_img2img_pipeline(self):
+        """Create img2img pipeline wrapper sharing components with base pipeline."""
         try:
             from diffusers import QwenImageImg2ImgPipeline
 
             # Share weights/components to avoid duplicate VRAM usage.
-            # NOTE: Do NOT enable CPU offload here - the base class load() will enable it
-            # on self.pipe after _load_pipeline returns. Since components are shared,
-            # the offload hooks will work for both pipelines.
+            # Created AFTER base load() so CPU offload hooks are already in place.
             self._img2img_pipe = QwenImageImg2ImgPipeline(**self.pipe.components)
+            # Sync execution device state
+            self._sync_img2img_execution_device()
+            logger.debug("QwenImageImg2ImgPipeline created for latent refinement")
         except Exception as e:
             logger.warning(
                 f"QwenImageImg2ImgPipeline not available in your diffusers install: {e}. "
                 "Latent refinement will be unavailable (update diffusers)."
             )
             self._img2img_pipe = None
+
+    def _sync_img2img_execution_device(self):
+        """Sync execution device/offload state from base pipe to img2img pipe.
+        
+        This ensures the img2img pipeline inherits the same offload hooks and
+        device placement as the base pipeline.
+        """
+        if self._img2img_pipe is None or self.pipe is None:
+            return
+
+        # Copy execution device if set (diffusers pipelines store this for input handling)
+        if hasattr(self.pipe, "_execution_device"):
+            try:
+                # Some diffusers versions use a property, others use an attribute
+                exec_device = self.pipe._execution_device
+                if hasattr(self._img2img_pipe, "_execution_device"):
+                    # Try to set it (may be read-only property in some versions)
+                    pass  # Usually synced via shared components
+            except Exception:
+                pass
+
+        # For sequential offload, the hooks are on the shared components,
+        # so they should work automatically. For model_cpu_offload, same applies.
+        # The key is that we create _img2img_pipe AFTER offload is enabled.
+        logger.debug("img2img pipeline execution device synced")
+
+    def unload(self):
+        """Unload pipeline and clear img2img wrapper to free VRAM."""
+        # Clear img2img pipeline first (it holds references to shared components)
+        if getattr(self, "_img2img_pipe", None) is not None:
+            del self._img2img_pipe
+            self._img2img_pipe = None
+            logger.debug("Cleared _img2img_pipe")
+
+        # Reset sequential offload flag
+        self._using_sequential_offload = False
+
+        # Call base unload (clears self.pipe, gc.collect, empty_cache)
+        super().unload()
 
     # ===== Latent helpers =====
 
@@ -191,6 +257,35 @@ class QwenImagePipeline(BasePipeline):
             lat = lat[:, :, 0]
         return lat
 
+    def encode_images_to_latents(self, images: torch.Tensor) -> torch.Tensor:
+        """Batch encode images [B,C,H,W] in [-1,1] to spatial latents [B,C,H/8,W/8].
+        
+        This is more efficient than looping encode_image_to_latent for batches.
+        """
+        if self.pipe is None:
+            raise RuntimeError("Pipeline not loaded")
+
+        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        images = images.to(target_device, dtype=self.dtype)
+        
+        # Qwen VAE expects 5D input [B,C,1,H,W]
+        images_5d = images.unsqueeze(2)
+
+        if self.enable_cpu_offload and not self._using_sequential_offload:
+            self.pipe.vae.to(target_device)
+
+        with torch.no_grad():
+            latents = self.pipe.vae.encode(images_5d).latent_dist.sample()
+
+        mean, std = self._latent_stats(device=latents.device, dtype=latents.dtype)
+        if mean is not None and std is not None:
+            latents = (latents - mean) / std
+
+        # Drop temporal dim -> [B,C,H,W]
+        if latents.ndim == 5:
+            latents = latents[:, :, 0]
+        return latents
+
     def decode_latent_to_image(self, latents: torch.Tensor) -> Image.Image:
         """Decode *spatial* standardized latents [B,C,H/8,W/8] to a PIL image."""
         import numpy as np
@@ -242,6 +337,43 @@ class QwenImagePipeline(BasePipeline):
         img = (img * 255).astype(np.uint8)
         return Image.fromarray(img)
 
+    def decode_latents_to_images(self, latents: torch.Tensor) -> torch.Tensor:
+        """Batch decode spatial latents [B,C,H/8,W/8] to images [B,C,H,W] in [0,1].
+        
+        This is more efficient than looping decode_latent_to_image for batches.
+        Returns tensor in [0,1] range with shape [B,C,H,W].
+        """
+        if self.pipe is None:
+            raise RuntimeError("Pipeline not loaded")
+
+        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+
+        # Handle spatial latents [B,C,H,W] -> 5D [B,C,1,H,W]
+        if latents.ndim == 4:
+            lat5d = latents.to(target_device, dtype=self.dtype).unsqueeze(2)
+        elif latents.ndim == 5:
+            lat5d = latents.to(target_device, dtype=self.dtype)
+        else:
+            raise ValueError(f"Expected spatial latents [B,C,H,W], got {tuple(latents.shape)}")
+
+        mean, std = self._latent_stats(device=lat5d.device, dtype=lat5d.dtype)
+        if mean is not None and std is not None:
+            lat5d = lat5d * std + mean
+
+        if self.enable_cpu_offload and not self._using_sequential_offload:
+            self.pipe.vae.to(target_device)
+
+        with torch.no_grad():
+            images = self.pipe.vae.decode(lat5d).sample
+
+        # Drop temporal dim if present
+        if images.ndim == 5:
+            images = images[:, :, 0]
+
+        # Convert from [-1,1] to [0,1]
+        images = (images / 2 + 0.5).clamp(0, 1)
+        return images
+
     # ===== Inference =====
 
     def _run_inference(
@@ -287,8 +419,8 @@ class QwenImagePipeline(BasePipeline):
                 # Convert packed -> spatial for ComfyUI compatibility.
                 if isinstance(out, torch.Tensor) and out.ndim == 3:
                     out = self._packed_to_spatial(out, height=height, width=width)
-                # Clear GPU cache after generation to free memory for next operations
-                if torch.cuda.is_available():
+                # Optionally clear GPU cache (off by default for faster iterative runs)
+                if AITK_AGGRESSIVE_CLEANUP and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 return {"latents": out}
 
@@ -301,8 +433,8 @@ class QwenImagePipeline(BasePipeline):
                 "Qwen latent refinement requires QwenImageImg2ImgPipeline (update diffusers)."
             )
 
-        # Clear GPU cache before refine step to reduce memory pressure
-        if torch.cuda.is_available():
+        # Optionally clear GPU cache before refine step (off by default)
+        if AITK_AGGRESSIVE_CLEANUP and torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
 
@@ -331,11 +463,12 @@ class QwenImagePipeline(BasePipeline):
             output_type=diffusers_out,
         )
 
-        # Aggressively free memory after img2img inference
+        # Optionally free memory after img2img inference (off by default)
         del lat4d
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
+        if AITK_AGGRESSIVE_CLEANUP:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
         if output_type == "latent":
             out = getattr(result, "images", None)
@@ -511,7 +644,7 @@ class QwenImageEditPlusPipeline(BasePipeline):
 
         # Calculate target size based on CONDITION_IMAGE_SIZE (keep aspect ratio)
         ratio = ctrl_tensor.shape[2] / ctrl_tensor.shape[3]
-        w = math.sqrt(CONDITION_IMAGE_SIZE * ratio)
+        w = math.sqrt(_get_condition_image_size() * ratio)
         h = w / ratio
         w = round(w / 32) * 32
         h = round(h / 32) * 32

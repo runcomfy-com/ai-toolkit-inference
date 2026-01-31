@@ -14,10 +14,21 @@
   "2": {
     "inputs": {
       "pipe": ["1", 0],
-      "prompt": "a majestic lion in the savanna, golden hour lighting, photorealistic",
-      "negative_prompt": "blurry, low quality, artifacts",
       "width": 512,
       "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "RCAITKEmptyLatent",
+    "_meta": {
+      "title": "AITK Empty Latent (512x512)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "latent": ["2", 0],
+      "prompt": "a majestic lion in the savanna, golden hour lighting, photorealistic",
+      "negative_prompt": "blurry, low quality, artifacts",
       "steps": 20,
       "cfg": 4.0,
       "seed": 42,
@@ -25,54 +36,52 @@
     },
     "class_type": "RCAITKSampler",
     "_meta": {
-      "title": "AITK Sampler (Initial 512x512)"
+      "title": "AITK Sampler (Initial txt2img)"
     }
   },
-  "3": {
+  "4": {
     "inputs": {
       "upscale_method": "bilinear",
       "width": 768,
       "height": 768,
       "crop": "disabled",
-      "samples": ["2", 0]
+      "samples": ["3", 0]
     },
     "class_type": "LatentUpscale",
     "_meta": {
       "title": "Latent Upscale (1.5x to 768x768)"
     }
   },
-  "4": {
+  "5": {
     "inputs": {
       "pipe": ["1", 0],
+      "latent": ["4", 0],
       "prompt": "a majestic lion in the savanna, golden hour lighting, photorealistic, highly detailed",
       "negative_prompt": "blurry, low quality, artifacts",
-      "width": 768,
-      "height": 768,
       "steps": 20,
       "cfg": 4.0,
       "seed": 42,
-      "denoise": 0.35,
-      "latent": ["3", 0]
+      "denoise": 0.35
     },
     "class_type": "RCAITKSampler",
     "_meta": {
       "title": "AITK Sampler (Refine at 0.35 denoise)"
     }
   },
-  "5": {
+  "6": {
     "inputs": {
       "pipe": ["1", 0],
-      "latent": ["4", 0]
+      "latent": ["5", 0]
     },
     "class_type": "RCAITKDecodeLatent",
     "_meta": {
       "title": "AITK Decode Latent"
     }
   },
-  "6": {
+  "7": {
     "inputs": {
       "filename_prefix": "qwen2512_latent_upscale",
-      "images": ["5", 0]
+      "images": ["6", 0]
     },
     "class_type": "SaveImage",
     "_meta": {
