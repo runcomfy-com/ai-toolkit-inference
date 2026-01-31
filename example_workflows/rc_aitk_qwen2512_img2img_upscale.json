@@ -1,8 +1,8 @@
 {
   "id": "00000000-0000-0000-0000-000000000000",
   "revision": 0,
-  "last_node_id": 12,
-  "last_link_id": 25,
+  "last_node_id": 8,
+  "last_link_id": 14,
   "nodes": [
     {
       "id": 1,
@@ -61,13 +61,13 @@
       "id": 2,
       "type": "RCAITKSampler",
       "pos": [520, -150],
-      "size": [400, 330],
+      "size": [400, 250],
       "flags": {},
       "order": 3,
       "mode": 0,
       "inputs": [
         {"name": "pipe", "type": "AITK_PIPELINE", "link": 2},
-        {"name": "latent", "shape": 7, "type": "LATENT", "link": 6}
+        {"name": "latent", "type": "LATENT", "link": 6}
       ],
       "outputs": [
         {"name": "LATENT", "type": "LATENT", "links": [10]}
@@ -77,12 +77,9 @@
       "widgets_values": [
         "a majestic lion in the savanna, golden hour lighting, photorealistic",
         "blurry, low quality, artifacts",
-        512,
-        512,
         20,
-        4,
+        4.0,
         759126743,
-        "randomize",
         0.5
       ]
     },
@@ -108,13 +105,13 @@
       "id": 4,
       "type": "RCAITKSampler",
       "pos": [1350, -170],
-      "size": [400, 330],
+      "size": [400, 250],
       "flags": {},
       "order": 5,
       "mode": 0,
       "inputs": [
         {"name": "pipe", "type": "AITK_PIPELINE", "link": 3},
-        {"name": "latent", "shape": 7, "type": "LATENT", "link": 11}
+        {"name": "latent", "type": "LATENT", "link": 11}
       ],
       "outputs": [
         {"name": "LATENT", "type": "LATENT", "links": [13]}
@@ -124,12 +121,9 @@
       "widgets_values": [
         "a majestic lion in the savanna, golden hour lighting, photorealistic, highly detailed",
         "blurry, low quality, artifacts",
-        768,
-        768,
         20,
-        4,
+        4.0,
         1045810574,
-        "randomize",
         0.35
       ]
     },
