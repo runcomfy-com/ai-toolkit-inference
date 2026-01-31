@@ -7,10 +7,12 @@ from typing import Dict, Any, Optional, List
 
 import torch
 from PIL import Image
-from diffusers import StableDiffusionXLPipeline, DDPMScheduler
 
 from .base import BasePipeline, PipelineConfig, LoraMergeMethod
 from ..schemas.models import ModelType
+
+# Lazy imports - diffusers is only imported when actually needed
+# This avoids loading all diffusers pipelines at startup
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,9 @@ class SDXLPipeline(BasePipeline):
 
     def _load_pipeline(self):
         """Load SDXL pipeline."""
+        # Lazy import to avoid loading all diffusers pipelines at startup
+        from diffusers import StableDiffusionXLPipeline, DDPMScheduler
+
         self.pipe = StableDiffusionXLPipeline.from_pretrained(
             self.CONFIG.base_model,
             torch_dtype=self.dtype,
@@ -83,6 +88,23 @@ class SDXLPipeline(BasePipeline):
 
         return latent
 
+    def encode_images_to_latents(self, images: torch.Tensor) -> torch.Tensor:
+        """Batch encode images [B,C,H,W] in [-1,1] to latents [B,C,H/8,W/8].
+        
+        This is more efficient than looping encode_image_to_latent for batches.
+        """
+        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        images = images.to(target_device, dtype=self.dtype)
+
+        if self.enable_cpu_offload:
+            self.pipe.vae.to(target_device)
+
+        with torch.no_grad():
+            latents = self.pipe.vae.encode(images).latent_dist.sample()
+            latents = latents * self.pipe.vae.config.scaling_factor
+
+        return latents
+
     def decode_latent_to_image(self, latents: torch.Tensor) -> Image.Image:
         """Decode latents to PIL image using the VAE."""
         import numpy as np
@@ -105,6 +127,26 @@ class SDXLPipeline(BasePipeline):
         image = image.float().cpu().permute(0, 2, 3, 1).numpy()[0]
         image = (image * 255).astype(np.uint8)
         return Image.fromarray(image)
+
+    def decode_latents_to_images(self, latents: torch.Tensor) -> torch.Tensor:
+        """Batch decode latents [B,C,H/8,W/8] to images [B,C,H,W] in [0,1].
+        
+        This is more efficient than looping decode_latent_to_image for batches.
+        Returns tensor in [0,1] range with shape [B,C,H,W].
+        """
+        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        latents = latents.to(target_device, dtype=self.dtype)
+        latents = latents / self.pipe.vae.config.scaling_factor
+
+        if self.enable_cpu_offload:
+            self.pipe.vae.to(target_device)
+
+        with torch.no_grad():
+            images = self.pipe.vae.decode(latents).sample
+
+        # Convert from [-1,1] to [0,1]
+        images = (images / 2 + 0.5).clamp(0, 1)
+        return images
 
     def _run_inference(
         self,

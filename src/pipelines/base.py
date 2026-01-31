@@ -12,9 +12,11 @@ from typing import Dict, Any, Optional, List
 
 import torch
 from PIL import Image
-from diffusers.utils.peft_utils import set_weights_and_activate_adapters
 
 from ..schemas.models import ModelType
+
+# Lazy imports - diffusers is only imported when actually needed
+# This avoids loading all diffusers pipelines at startup
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +254,9 @@ class BasePipeline(ABC):
         Args:
             scale: LoRA scale value
         """
+        # Lazy import to avoid loading all diffusers pipelines at startup
+        from diffusers.utils.peft_utils import set_weights_and_activate_adapters
+
         # Get all components that may have LoRA adapters
         for component_name in ["transformer", "unet", "text_encoder", "text_encoder_2"]:
             component = getattr(self.pipe, component_name, None)
@@ -485,10 +490,17 @@ class BasePipeline(ABC):
         if fps is None:
             fps = self.CONFIG.default_fps
 
-        # # Validate dimensions
-        # divisor = self.CONFIG.resolution_divisor
-        # width = (width // divisor) * divisor
-        # height = (height // divisor) * divisor
+        # Validate and snap dimensions to resolution_divisor (floor + warn)
+        divisor = self.CONFIG.resolution_divisor
+        snapped_width = (width // divisor) * divisor
+        snapped_height = (height // divisor) * divisor
+        if snapped_width != width or snapped_height != height:
+            logger.warning(
+                f"Resolution {width}x{height} not divisible by {divisor}; "
+                f"snapping to {snapped_width}x{snapped_height}"
+            )
+            width = snapped_width
+            height = snapped_height
 
         # Handle seed
         if seed < 0:

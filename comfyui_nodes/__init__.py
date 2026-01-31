@@ -36,6 +36,7 @@ from .rc_models import (
 from .rc_latent_workflow import (
     RCAITKLoRA,
     RCAITKLoadPipeline,
+    RCAITKEmptyLatent,
     RCAITKSampler,
     RCAITKDecodeLatent,
     RCAITKEncodeImage,
@@ -89,6 +90,7 @@ NODE_CLASS_MAPPINGS = {
     # Latent workflow nodes
     "RCAITKLoRA": RCAITKLoRA,
     "RCAITKLoadPipeline": RCAITKLoadPipeline,
+    "RCAITKEmptyLatent": RCAITKEmptyLatent,
     "RCAITKSampler": RCAITKSampler,
     "RCAITKDecodeLatent": RCAITKDecodeLatent,
     "RCAITKEncodeImage": RCAITKEncodeImage,
@@ -135,6 +137,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     # Latent workflow nodes
     "RCAITKLoRA": "RC AITK LoRA",
     "RCAITKLoadPipeline": "RC AITK Load Pipeline",
+    "RCAITKEmptyLatent": "RC AITK Empty Latent",
     "RCAITKSampler": "RC AITK Sampler",
     "RCAITKDecodeLatent": "RC AITK Decode Latent",
     "RCAITKEncodeImage": "RC AITK Encode Image",

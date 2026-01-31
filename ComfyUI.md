@@ -116,6 +116,8 @@ They expose `num_frames` and `fps` as optional inputs.
 
 For advanced workflows with latent manipulation (upscale + second pass, etc.), use these nodes under `RunComfy-Inference/Workflow`:
 
+#### Core nodes
+
 - **`RCAITKLoRA`** - Create a LoRA configuration object
   - Select from ComfyUI's `models/loras` dropdown, or provide a path/URL
   - Outputs `AITK_LORA` to connect to `RCAITKLoadPipeline`
@@ -124,25 +126,35 @@ For advanced workflows with latent manipulation (upscale + second pass, etc.), u
   - Supports: SD 1.5, SDXL, Qwen Image, Qwen Image 2512
   - Outputs `AITK_PIPELINE` for use with sampler/decode nodes
 
-- **`RCAITKSampler`** - Sample latents from the pipeline
-  - Outputs `LATENT` (ComfyUI format) for further processing
-  - Accepts optional input `LATENT` for refinement (img2img style)
-  - `denoise_strength` controls how much to denoise (0.33 for second pass, 1.0 for full generation)
+- **`RCAITKEmptyLatent`** - Create an empty latent (like ComfyUI's EmptyLatentImage)
+  - Inputs: `pipe`, `width`, `height`, `batch_size`
+  - Outputs `LATENT` for use with `RCAITKSampler`
+  - Width/height are auto-snapped to the model's resolution divisor
+
+- **`RCAITKSampler`** - Sample latents (requires LATENT input)
+  - Always takes a `LATENT` input (use `RCAITKEmptyLatent` for txt2img)
+  - Width/height inferred from latent shape
+  - `denoise=1.0` with empty latent = txt2img
+  - `denoise<1.0` or real latent input = img2img/refine
 
 - **`RCAITKDecodeLatent`** - Decode latents to images
   - Uses the pipeline's VAE to decode `LATENT` → `IMAGE`
+  - Batch-aware: efficiently decodes entire batches in one VAE pass
 
 - **`RCAITKEncodeImage`** - Encode images to latents
   - Useful for starting img2img workflows from an existing image
+  - Batch-aware: efficiently encodes entire batches in one VAE pass
 
-**Typical latent upscale + refine workflow:**
+#### Recommended workflow pattern
+
+This mirrors the standard ComfyUI `EmptyLatentImage → KSampler` pattern:
 
 ```
-RCAITKLoRA → RCAITKLoadPipeline → RCAITKSampler (1st pass)
-                                        ↓
-                                 LatentUpscale (ComfyUI)
-                                        ↓
-                          RCAITKSampler (denoise=0.33) → RCAITKDecodeLatent → IMAGE
+RCAITKLoadPipeline → RCAITKEmptyLatent → RCAITKSampler (1st pass)
+                                                ↓
+                                         LatentUpscale (ComfyUI built-in)
+                                                ↓
+                              RCAITKSampler (denoise=0.33) → RCAITKDecodeLatent → IMAGE
 ```
 
 See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
@@ -188,6 +200,7 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
 - Latent Workflow (AITK):
   - `RCAITKLoRA`
   - `RCAITKLoadPipeline`
+  - `RCAITKEmptyLatent`
   - `RCAITKSampler`
   - `RCAITKDecodeLatent`
   - `RCAITKEncodeImage`
