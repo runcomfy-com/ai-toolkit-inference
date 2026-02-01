@@ -81,8 +81,8 @@ class _RCAitkBase:
     DEFAULT_NUM_FRAMES: int = 41
     DEFAULT_FPS: int = 16
 
-    # pipeline loading
-    ENABLE_CPU_OFFLOAD: bool = False
+    # pipeline loading - default offload mode for this model class
+    DEFAULT_OFFLOAD_MODE: str = "none"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -96,6 +96,10 @@ class _RCAitkBase:
         }
 
         opt = {
+            "offload_mode": (
+                ["none", "model", "sequential"],
+                {"default": cls.DEFAULT_OFFLOAD_MODE, "tooltip": "CPU offload strategy: none=full VRAM, model=lower VRAM, sequential=lowest VRAM (slowest)"},
+            ),
             "lora_path": ("STRING", {"default": "", "tooltip": "LoRA local path or URL (single LoRA only)"}),
             "lora_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
             "hf_token": ("STRING", {"default": ""}),
@@ -195,10 +199,13 @@ class _RCAitkBase:
         num_frames = int(kwargs.get("num_frames", self.DEFAULT_NUM_FRAMES)) if self.IS_VIDEO else None
         fps = int(kwargs.get("fps", self.DEFAULT_FPS)) if self.IS_VIDEO else None
 
+        # Get offload_mode from input or use class default
+        offload_mode = kwargs.get("offload_mode", self.DEFAULT_OFFLOAD_MODE)
+
         pipe = get_or_load_pipeline(
             model_id=self.MODEL_ID,
             pipeline_ctor=self._pipeline_ctor(),
-            enable_cpu_offload=self.ENABLE_CPU_OFFLOAD,
+            offload_mode=offload_mode,
             hf_token=hf_token,
             lora_paths=lora_paths,
             lora_scale=lora_scale_value,
@@ -544,7 +551,7 @@ class RCLTX2(_RCAitkBase):
     DISPLAY_NAME = "RC LTX-2"
     IS_VIDEO = True
     DEFAULT_FPS = 24
-    ENABLE_CPU_OFFLOAD = True
+    DEFAULT_OFFLOAD_MODE = "model"
 
     def _pipeline_ctor(self):
         from src.pipelines.ltx2 import LTX2Pipeline
@@ -603,7 +610,7 @@ class RCWan22T2V14B(_RCAitkBase):
     MODEL_ID = "wan22_14b_t2v"
     DISPLAY_NAME = "RC Wan 2.2 T2V 14B"
     IS_VIDEO = True
-    ENABLE_CPU_OFFLOAD = True
+    DEFAULT_OFFLOAD_MODE = "model"
 
     @classmethod
     def INPUT_TYPES(cls):

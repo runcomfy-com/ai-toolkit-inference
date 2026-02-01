@@ -76,8 +76,10 @@ class SD15Pipeline(BasePipeline):
         img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
         img_tensor = (img_tensor * 2.0 - 1.0).to(target_device, dtype=self.dtype)
 
-        # Move VAE to GPU explicitly if using CPU offload
-        if self.enable_cpu_offload:
+        # Move VAE to GPU explicitly only for model offload mode.
+        # In sequential mode, hooks handle device placement automatically.
+        # In none mode, VAE is already on GPU.
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         # Encode to latent
@@ -95,7 +97,8 @@ class SD15Pipeline(BasePipeline):
         target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
         images = images.to(target_device, dtype=self.dtype)
 
-        if self.enable_cpu_offload:
+        # Move VAE to GPU explicitly only for model offload mode.
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():
@@ -113,8 +116,8 @@ class SD15Pipeline(BasePipeline):
         latents = latents.to(target_device, dtype=self.dtype)
         latents = latents / self.pipe.vae.config.scaling_factor
 
-        # Move VAE to GPU explicitly if using CPU offload
-        if self.enable_cpu_offload:
+        # Move VAE to GPU explicitly only for model offload mode.
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():
@@ -136,7 +139,8 @@ class SD15Pipeline(BasePipeline):
         latents = latents.to(target_device, dtype=self.dtype)
         latents = latents / self.pipe.vae.config.scaling_factor
 
-        if self.enable_cpu_offload:
+        # Move VAE to GPU explicitly only for model offload mode.
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():

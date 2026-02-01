@@ -106,18 +106,11 @@ class RCAITKLoadPipeline:
                     ],
                     {"tooltip": "Which base model pipeline to load"},
                 ),
-                "enable_cpu_offload": (
-                    "BOOLEAN",
+                "offload_mode": (
+                    ["model", "sequential", "none"],
                     {
-                        "default": True,
-                        "tooltip": "Enable diffusers model CPU offload (lower VRAM, slower)",
-                    },
-                ),
-                "low_ram_mode": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Use sequential CPU offload for systems with <64GB RAM (much slower but uses less RAM)",
+                        "default": "model",
+                        "tooltip": "CPU offload strategy: 'model' (balanced VRAM/speed), 'sequential' (lowest VRAM, slowest), 'none' (fastest, highest VRAM)",
                     },
                 ),
                 "hf_token": (
@@ -138,7 +131,13 @@ class RCAITKLoadPipeline:
     FUNCTION = "load"
     CATEGORY = WORKFLOW_CATEGORY
 
-    def load(self, pipeline: str, enable_cpu_offload: bool, low_ram_mode: bool, hf_token: str, lora=None):
+    def load(
+        self,
+        pipeline: str,
+        offload_mode: str,
+        hf_token: str,
+        lora=None,
+    ):
         # Import here so ComfyUI can load the node pack even if some deps aren't installed.
         from src.pipelines.sd15 import SD15Pipeline
         from src.pipelines.sdxl import SDXLPipeline
@@ -172,15 +171,9 @@ class RCAITKLoadPipeline:
             pipeline_ctor=pipeline_ctor,
             lora_paths=lora_paths,
             lora_scale=lora_scale,
-            enable_cpu_offload=bool(enable_cpu_offload),
+            offload_mode=offload_mode,
             hf_token=token,
         )
-
-        # Enable sequential CPU offload for low RAM systems (<64GB)
-        # This is slower but uses much less RAM
-        if low_ram_mode and enable_cpu_offload:
-            if hasattr(pipe, "enable_sequential_cpu_offload"):
-                pipe.enable_sequential_cpu_offload()
 
         return (pipe,)
 

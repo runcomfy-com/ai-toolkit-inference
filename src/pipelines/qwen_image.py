@@ -70,21 +70,17 @@ class QwenImagePipeline(BasePipeline):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._img2img_pipe = None
-        self._using_sequential_offload = False  # Track if sequential offload is active
 
-    def enable_sequential_cpu_offload(self):
+    def _enable_sequential_cpu_offload(self):
         """Enable sequential CPU offload for lower RAM usage (slower inference).
         
-        Call this after load() if you need to reduce RAM usage on systems with <64GB RAM.
+        Overrides BasePipeline._enable_sequential_cpu_offload() to sync 
+        the img2img pipeline after enabling offload on the base pipeline.
         """
-        if self.pipe is not None and hasattr(self.pipe, "enable_sequential_cpu_offload"):
-            logger.info("Enabling SEQUENTIAL CPU offload (low RAM mode)")
-            self.pipe.enable_sequential_cpu_offload()
-            self._using_sequential_offload = True
-            # Sync img2img pipe if already created
-            self._sync_img2img_execution_device()
-        else:
-            logger.warning("Sequential offload not available")
+        # Call base implementation
+        super()._enable_sequential_cpu_offload()
+        # Sync img2img pipe if already created
+        self._sync_img2img_execution_device()
 
     def _load_pipeline(self):
         """Load the base Qwen pipeline. img2img is created in load() after device setup."""
@@ -154,9 +150,6 @@ class QwenImagePipeline(BasePipeline):
             del self._img2img_pipe
             self._img2img_pipe = None
             logger.debug("Cleared _img2img_pipe")
-
-        # Reset sequential offload flag
-        self._using_sequential_offload = False
 
         # Call base unload (clears self.pipe, gc.collect, empty_cache)
         super().unload()
@@ -242,7 +235,7 @@ class QwenImagePipeline(BasePipeline):
 
         # With sequential_cpu_offload, VAE uses meta tensors with hooks - don't call .to()
         # With model_cpu_offload, we need to move VAE to device explicitly
-        if self.enable_cpu_offload and not self._using_sequential_offload:
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():
@@ -271,7 +264,7 @@ class QwenImagePipeline(BasePipeline):
         # Qwen VAE expects 5D input [B,C,1,H,W]
         images_5d = images.unsqueeze(2)
 
-        if self.enable_cpu_offload and not self._using_sequential_offload:
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():
@@ -322,7 +315,7 @@ class QwenImagePipeline(BasePipeline):
 
         # With sequential_cpu_offload, VAE uses meta tensors with hooks - don't call .to()
         # With model_cpu_offload, we need to move VAE to device explicitly
-        if self.enable_cpu_offload and not self._using_sequential_offload:
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():
@@ -360,7 +353,7 @@ class QwenImagePipeline(BasePipeline):
         if mean is not None and std is not None:
             lat5d = lat5d * std + mean
 
-        if self.enable_cpu_offload and not self._using_sequential_offload:
+        if self.offload_mode == "model":
             self.pipe.vae.to(target_device)
 
         with torch.no_grad():

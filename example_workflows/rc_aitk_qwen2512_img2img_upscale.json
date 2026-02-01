@@ -20,7 +20,7 @@
       ],
       "title": "AITK Load Pipeline (Qwen 2512)",
       "properties": {"Node name for S&R": "RCAITKLoadPipeline"},
-      "widgets_values": ["qwen_image_2512", true, false, ""]
+      "widgets_values": ["qwen_image_2512", "model", ""]
     },
     {
       "id": 7,

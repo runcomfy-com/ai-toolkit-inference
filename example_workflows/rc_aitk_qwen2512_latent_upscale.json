@@ -2,8 +2,7 @@
   "1": {
     "inputs": {
       "pipeline": "qwen_image_2512",
-      "enable_cpu_offload": true,
-      "low_ram_mode": false,
+      "offload_mode": "model",
       "hf_token": ""
     },
     "class_type": "RCAITKLoadPipeline",

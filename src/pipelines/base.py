@@ -8,7 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 
 import torch
 from PIL import Image
@@ -19,6 +19,13 @@ from ..schemas.models import ModelType
 # This avoids loading all diffusers pipelines at startup
 
 logger = logging.getLogger(__name__)
+
+
+# CPU offload mode: exactly one strategy is applied during pipeline load.
+# - "none": No offload, model stays on GPU (fastest inference, highest VRAM)
+# - "model": Model CPU offload - moves full model between CPU/GPU (balanced)
+# - "sequential": Sequential CPU offload - moves layers one at a time (lowest VRAM, slowest)
+OffloadMode = Literal["none", "model", "sequential"]
 
 
 class LoraMergeMethod(Enum):
@@ -101,15 +108,16 @@ class BasePipeline(ABC):
     def __init__(
         self,
         device: str = "cuda",
-        enable_cpu_offload: bool = True,
+        offload_mode: OffloadMode = "model",
         hf_token: Optional[str] = None,
     ):
         if self.CONFIG is None:
             raise NotImplementedError(f"{self.__class__.__name__} must define CONFIG class attribute")
 
         self.device = device
-        self.enable_cpu_offload = enable_cpu_offload
         self.hf_token = hf_token
+        self.offload_mode: OffloadMode = offload_mode
+
         self.pipe = None
         self.lora_loaded = False
         self.dtype = torch.bfloat16
@@ -135,18 +143,63 @@ class BasePipeline(ABC):
         # This provides ~20% speedup for Transformer-based models (Wan, FLUX, etc.)
         self._enable_xformers()
 
-        # Move to device or enable CPU offload
-        if self.enable_cpu_offload and hasattr(self.pipe, "enable_model_cpu_offload"):
-            logger.info("Enabling CPU offload")
-            self.pipe.enable_model_cpu_offload()
-        else:
-            self.pipe.to(self.device)
+        # Apply exactly ONE offload strategy based on offload_mode.
+        # This is the single place where device placement is configured.
+        self._apply_offload_mode()
 
         # Load LoRA weights
         if lora_paths:
             self._load_lora(lora_paths, lora_scale)
         else:
             logger.warning("No LoRA paths provided")
+
+    def _apply_offload_mode(self):
+        """Apply the configured offload mode to the pipeline.
+        
+        This method applies exactly ONE offload strategy:
+        - "sequential": Sequential CPU offload (lowest VRAM, slowest)
+        - "model": Model CPU offload (balanced)
+        - "none": No offload, model on GPU (fastest, highest VRAM)
+        
+        Subclasses can override this if they need custom offload behavior.
+        """
+        if self.pipe is None:
+            return
+
+        if self.offload_mode == "sequential":
+            self._enable_sequential_cpu_offload()
+        elif self.offload_mode == "model":
+            if hasattr(self.pipe, "enable_model_cpu_offload"):
+                logger.info("Enabling model CPU offload")
+                self.pipe.enable_model_cpu_offload()
+            else:
+                logger.warning("Model CPU offload not available, moving to device")
+                self.pipe.to(self.device)
+        else:  # "none"
+            logger.info(f"Moving pipeline to {self.device} (no offload)")
+            self.pipe.to(self.device)
+
+    def _enable_sequential_cpu_offload(self):
+        """Enable sequential CPU offload for lowest VRAM usage.
+        
+        Sequential offload moves layers one at a time between CPU and GPU,
+        which uses minimal VRAM but is slower than model offload.
+        
+        Subclasses can override this to add additional state tracking
+        (e.g., QwenImagePipeline sets _using_sequential_offload).
+        """
+        if self.pipe is None:
+            return
+
+        if hasattr(self.pipe, "enable_sequential_cpu_offload"):
+            logger.info("Enabling sequential CPU offload (low VRAM mode)")
+            self.pipe.enable_sequential_cpu_offload()
+        else:
+            logger.warning("Sequential CPU offload not available, falling back to model offload")
+            if hasattr(self.pipe, "enable_model_cpu_offload"):
+                self.pipe.enable_model_cpu_offload()
+            else:
+                self.pipe.to(self.device)
 
     @abstractmethod
     def _load_pipeline(self):
