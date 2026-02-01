@@ -40,6 +40,7 @@ from .rc_latent_workflow import (
     RCAITKSampler,
     RCAITKDecodeLatent,
     RCAITKEncodeImage,
+    RCAITKGenerate,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -94,6 +95,7 @@ NODE_CLASS_MAPPINGS = {
     "RCAITKSampler": RCAITKSampler,
     "RCAITKDecodeLatent": RCAITKDecodeLatent,
     "RCAITKEncodeImage": RCAITKEncodeImage,
+    "RCAITKGenerate": RCAITKGenerate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -141,6 +143,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCAITKSampler": "RC AITK Sampler",
     "RCAITKDecodeLatent": "RC AITK Decode Latent",
     "RCAITKEncodeImage": "RC AITK Encode Image",
+    "RCAITKGenerate": "RC AITK Generate",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

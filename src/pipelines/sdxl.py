@@ -69,8 +69,7 @@ class SDXLPipeline(BasePipeline):
         """Encode a PIL image to latent space using the VAE."""
         import numpy as np
 
-        # With CPU offload, VAE params are on CPU but hooks move them to GPU on forward
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
 
         # Convert PIL to tensor [B, C, H, W] in [-1, 1]
         img_array = np.array(image.convert("RGB")).astype(np.float32) / 255.0
@@ -95,7 +94,7 @@ class SDXLPipeline(BasePipeline):
         
         This is more efficient than looping encode_image_to_latent for batches.
         """
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
         images = images.to(target_device, dtype=self.dtype)
 
         # Move VAE to GPU explicitly only for model offload mode.
@@ -112,9 +111,7 @@ class SDXLPipeline(BasePipeline):
         """Decode latents to PIL image using the VAE."""
         import numpy as np
 
-        # With CPU offload, VAE params are on CPU but hooks move them to GPU on forward
-        # We need to ensure latents are on the target compute device (cuda:0)
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
         latents = latents.to(target_device, dtype=self.dtype)
         latents = latents / self.pipe.vae.config.scaling_factor
 
@@ -137,7 +134,7 @@ class SDXLPipeline(BasePipeline):
         This is more efficient than looping decode_latent_to_image for batches.
         Returns tensor in [0,1] range with shape [B,C,H,W].
         """
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
         latents = latents.to(target_device, dtype=self.dtype)
         latents = latents / self.pipe.vae.config.scaling_factor
 
@@ -216,6 +213,9 @@ class SDXLPipeline(BasePipeline):
             # Adjust steps for img2img
             if denoise_strength < 1.0:
                 call_kwargs["num_inference_steps"] = num_inference_steps
+
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
 
         result = self.pipe(**call_kwargs)
 

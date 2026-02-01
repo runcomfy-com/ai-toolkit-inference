@@ -166,17 +166,21 @@ class Lumina2Pipeline(BasePipeline):
         """Run Lumina2 inference."""
         neg_prompt = negative_prompt if negative_prompt else ""
 
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": neg_prompt,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "max_sequence_length": 256,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            result = self.pipe(
-                prompt=prompt,
-                negative_prompt=neg_prompt,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                max_sequence_length=256,
-            )
+            result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}
 

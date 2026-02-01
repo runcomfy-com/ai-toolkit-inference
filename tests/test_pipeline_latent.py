@@ -107,6 +107,7 @@ class TestPipelineCacheKey:
         key1 = PipelineCacheKey(
             model_id="test-model",
             pipeline_id="SDXLPipeline",
+            offload_mode="none",
             hf_token=None,
             lora_paths_key=(),
             lora_scale_key=1.0,
@@ -114,6 +115,7 @@ class TestPipelineCacheKey:
         key2 = PipelineCacheKey(
             model_id="test-model",
             pipeline_id="SD15Pipeline",
+            offload_mode="none",
             hf_token=None,
             lora_paths_key=(),
             lora_scale_key=1.0,
@@ -129,6 +131,7 @@ class TestPipelineCacheKey:
         key1 = PipelineCacheKey(
             model_id="test-model",
             pipeline_id="SDXLPipeline",
+            offload_mode="none",
             hf_token=None,
             lora_paths_key=(),
             lora_scale_key=1.0,
@@ -136,6 +139,7 @@ class TestPipelineCacheKey:
         key2 = PipelineCacheKey(
             model_id="test-model",
             pipeline_id="SDXLPipeline",
+            offload_mode="none",
             hf_token=None,
             lora_paths_key=(),
             lora_scale_key=1.0,
@@ -183,7 +187,7 @@ class TestBackwardCompatibility:
         pipe = MockPipeline.__new__(MockPipeline)
         pipe.device = "cpu"
         pipe.dtype = torch.float32
-        pipe.enable_cpu_offload = False
+        pipe.offload_mode = "none"
         pipe.pipe = Mock()
         pipe.CONFIG = MockPipeline.CONFIG
 
@@ -292,11 +296,8 @@ class TestComfyUINodeInputTypes:
         input_types = RCAITKSampler.INPUT_TYPES()
         assert "required" in input_types
         assert "pipe" in input_types["required"]  # Fixed: was "pipeline"
+        assert "latent" in input_types["required"]
         assert "prompt" in input_types["required"]
-
-        # Should accept optional latent input
-        assert "optional" in input_types
-        assert "latent" in input_types["optional"]
 
         # Check RETURN_TYPES includes LATENT
         assert "LATENT" in RCAITKSampler.RETURN_TYPES

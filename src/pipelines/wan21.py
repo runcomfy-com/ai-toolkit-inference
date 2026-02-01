@@ -79,17 +79,20 @@ class Wan21T2V14BPipeline(BasePipeline):
     ) -> Dict[str, Any]:
         """Run Wan 2.1 T2V inference."""
 
-        result = self.pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",
-        )
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "output_type": "pil",
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         # result.frames is a list of lists (batch of videos, each video is list of frames)
         frames = result.frames[0] if hasattr(result, "frames") else result.images
@@ -163,18 +166,21 @@ class Wan21I2V14BPipeline(Wan21T2V14BPipeline):
         # Resize control image to match output dimensions (aligned with toolkit)
         control_image = control_image.resize((width, height), Image.LANCZOS)
 
-        result = self.pipe(
-            image=control_image,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            output_type="pil",
-        )
+        call_kwargs = {
+            "image": control_image,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "output_type": "pil",
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         frames = result.frames[0] if hasattr(result, "frames") else result.images
 

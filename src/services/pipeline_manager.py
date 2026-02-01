@@ -471,13 +471,16 @@ class PipelineManager:
             self._cached_lora_paths = []
             self._cached_lora_scale = 1.0
 
-            # Force garbage collection
+            # Optional extra cleanup (BasePipeline.unload already does gc/empty_cache).
             import gc
             import torch
+            import os
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            aggressive = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
+            if aggressive:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     def unload_pipeline(self, pipeline: Any = None):
         """

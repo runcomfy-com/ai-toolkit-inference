@@ -51,14 +51,17 @@ class FluxDevPipeline(BasePipeline):
         fps: int = 16,
     ) -> Dict[str, Any]:
         """Run FLUX.1-dev inference."""
-        result = self.pipe(
-            prompt=prompt,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            negative_prompt=negative_prompt,
-        )
+        call_kwargs = {
+            "prompt": prompt,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "negative_prompt": negative_prompt,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}

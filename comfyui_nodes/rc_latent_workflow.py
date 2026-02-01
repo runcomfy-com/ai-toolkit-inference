@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .rc_common import get_or_load_pipeline, comfy_to_pil_image, pil_frames_to_comfy_images
+from .rc_common import get_or_load_pipeline, comfy_to_pil_image, pil_frames_to_comfy_images, pil_to_comfy_image
 
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
@@ -67,6 +67,14 @@ class RCAITKLoRA:
         return {
             "required": {
                 "lora_name": (loras, {"tooltip": "Pick a LoRA from ComfyUI models/loras"}),
+                "lora_path_or_url": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": "Optional override: local filesystem path or URL to a LoRA. If set, this overrides the dropdown.",
+                    },
+                ),
                 "lora_scale": (
                     "FLOAT",
                     {
@@ -84,27 +92,72 @@ class RCAITKLoRA:
     FUNCTION = "build"
     CATEGORY = WORKFLOW_CATEGORY
 
-    def build(self, lora_name: str, lora_scale: float):
+    def build(self, lora_name: str, lora_path_or_url: str, lora_scale: float):
         # Keep it simple: a dict with paths + scale.
         # The loader node will resolve the full path.
-        return ({"lora_name": lora_name, "lora_scale": float(lora_scale)},)
+        override = (lora_path_or_url or "").strip()
+        chosen = override if override else (lora_name or "").strip()
+        return (
+            {
+                "lora_name": chosen,
+                "lora_path_or_url": override,
+                "lora_scale": float(lora_scale),
+            },
+        )
 
 
 class RCAITKLoadPipeline:
-    """Load an ai-toolkit pipeline for latent workflows."""
+    """Load an ai-toolkit pipeline for modular workflows.
+    
+    Supports all ai-toolkit pipelines. For SD15, SDXL, and Qwen Image models,
+    you can use the full latent workflow (EmptyLatent -> Sampler -> Decode).
+    For other models, use the RCAITKGenerate node for inference.
+    """
+
+    # Complete list of all supported pipelines
+    ALL_PIPELINES = [
+        # Latent workflow supported
+        "sd15",
+        "sdxl",
+        "qwen_image",
+        "qwen_image_2512",
+        # Image-only (use RCAITKGenerate)
+        "flux",
+        "flux_kontext",
+        "flux2",
+        "flux2_klein_4b",
+        "flux2_klein_9b",
+        "flex1",
+        "flex2",
+        "zimage",
+        "zimage_turbo",
+        "zimage_deturbo",
+        "chroma",
+        "hidream",
+        "hidream_e1",
+        "lumina2",
+        "omnigen2",
+        "qwen_image_edit",
+        "qwen_image_edit_plus",
+        "qwen_image_edit_plus_2511",
+        # Video models
+        "ltx2",
+        "wan21_14b",
+        "wan21_1b",
+        "wan21_i2v_14b",
+        "wan21_i2v_14b480p",
+        "wan22_14b_t2v",
+        "wan22_14b_i2v",
+        "wan22_5b",
+    ]
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "pipeline": (
-                    [
-                        "sd15",
-                        "sdxl",
-                        "qwen_image",
-                        "qwen_image_2512",
-                    ],
-                    {"tooltip": "Which base model pipeline to load"},
+                    cls.ALL_PIPELINES,
+                    {"tooltip": "Which model pipeline to load"},
                 ),
                 "offload_mode": (
                     ["model", "sequential", "none"],
@@ -138,19 +191,44 @@ class RCAITKLoadPipeline:
         hf_token: str,
         lora=None,
     ):
-        # Import here so ComfyUI can load the node pack even if some deps aren't installed.
-        from src.pipelines.sd15 import SD15Pipeline
-        from src.pipelines.sdxl import SDXLPipeline
-        from src.pipelines.qwen_image import QwenImagePipeline, QwenImage2512Pipeline
-
+        # Import pipeline classes lazily
         ctor_map = {
-            "sd15": SD15Pipeline,
-            "sdxl": SDXLPipeline,
-            "qwen_image": QwenImagePipeline,
-            "qwen_image_2512": QwenImage2512Pipeline,
+            "sd15": lambda: __import__("src.pipelines.sd15", fromlist=["SD15Pipeline"]).SD15Pipeline,
+            "sdxl": lambda: __import__("src.pipelines.sdxl", fromlist=["SDXLPipeline"]).SDXLPipeline,
+            "qwen_image": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImagePipeline"]).QwenImagePipeline,
+            "qwen_image_2512": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImage2512Pipeline"]).QwenImage2512Pipeline,
+            "flux": lambda: __import__("src.pipelines.flux_dev", fromlist=["FluxDevPipeline"]).FluxDevPipeline,
+            "flux_kontext": lambda: __import__("src.pipelines.flux_kontext", fromlist=["FluxKontextPipeline"]).FluxKontextPipeline,
+            "flux2": lambda: __import__("src.pipelines.flux2", fromlist=["Flux2Pipeline"]).Flux2Pipeline,
+            "flux2_klein_4b": lambda: __import__("src.pipelines.flux2_klein", fromlist=["Flux2Klein4BPipeline"]).Flux2Klein4BPipeline,
+            "flux2_klein_9b": lambda: __import__("src.pipelines.flux2_klein", fromlist=["Flux2Klein9BPipeline"]).Flux2Klein9BPipeline,
+            "flex1": lambda: __import__("src.pipelines.flex1_alpha", fromlist=["Flex1AlphaPipeline"]).Flex1AlphaPipeline,
+            "flex2": lambda: __import__("src.pipelines.flex2", fromlist=["Flex2Pipeline"]).Flex2Pipeline,
+            "zimage": lambda: __import__("src.pipelines.zimage", fromlist=["ZImagePipeline"]).ZImagePipeline,
+            "zimage_turbo": lambda: __import__("src.pipelines.zimage_turbo", fromlist=["ZImageTurboPipeline"]).ZImageTurboPipeline,
+            "zimage_deturbo": lambda: __import__("src.pipelines.zimage_deturbo", fromlist=["ZImageDeturboPipeline"]).ZImageDeturboPipeline,
+            "chroma": lambda: __import__("src.pipelines.chroma", fromlist=["ChromaPipeline"]).ChromaPipeline,
+            "hidream": lambda: __import__("src.pipelines.hidream", fromlist=["HiDreamPipeline"]).HiDreamPipeline,
+            "hidream_e1": lambda: __import__("src.pipelines.hidream", fromlist=["HiDreamE1Pipeline"]).HiDreamE1Pipeline,
+            "lumina2": lambda: __import__("src.pipelines.lumina2", fromlist=["Lumina2Pipeline"]).Lumina2Pipeline,
+            "omnigen2": lambda: __import__("src.pipelines.omnigen2", fromlist=["OmniGen2Pipeline"]).OmniGen2Pipeline,
+            "qwen_image_edit": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImageEditPipeline"]).QwenImageEditPipeline,
+            "qwen_image_edit_plus": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImageEditPlus2509Pipeline"]).QwenImageEditPlus2509Pipeline,
+            "qwen_image_edit_plus_2511": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImageEditPlus2511Pipeline"]).QwenImageEditPlus2511Pipeline,
+            "ltx2": lambda: __import__("src.pipelines.ltx2", fromlist=["LTX2Pipeline"]).LTX2Pipeline,
+            "wan21_14b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21T2V14BPipeline"]).Wan21T2V14BPipeline,
+            "wan21_1b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21T2V1BPipeline"]).Wan21T2V1BPipeline,
+            "wan21_i2v_14b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21I2V14BPipeline"]).Wan21I2V14BPipeline,
+            "wan21_i2v_14b480p": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21I2V14B480PPipeline"]).Wan21I2V14B480PPipeline,
+            "wan22_14b_t2v": lambda: __import__("src.pipelines.wan22_t2v", fromlist=["Wan22T2V14BPipeline"]).Wan22T2V14BPipeline,
+            "wan22_14b_i2v": lambda: __import__("src.pipelines.wan22_i2v", fromlist=["Wan22I2V14BPipeline"]).Wan22I2V14BPipeline,
+            "wan22_5b": lambda: __import__("src.pipelines.wan22_5b", fromlist=["Wan22TI2V5BPipeline"]).Wan22TI2V5BPipeline,
         }
 
-        pipeline_ctor = ctor_map[pipeline]
+        if pipeline not in ctor_map:
+            raise ValueError(f"Unknown pipeline: {pipeline}")
+
+        pipeline_ctor = ctor_map[pipeline]()
 
         lora_paths = []
         lora_scale = 1.0
@@ -158,8 +236,13 @@ class RCAITKLoadPipeline:
         if lora is not None:
             import folder_paths
 
+            override = (lora.get("lora_path_or_url") or "").strip()
             name = (lora.get("lora_name") or "").strip()
-            if name:
+            if override:
+                # Pass-through: allow URL or absolute/local filesystem path
+                lora_paths = [override]
+            elif name:
+                # Dropdown selection: resolve via ComfyUI's loras folder
                 lora_paths = [folder_paths.get_full_path_or_raise("loras", name)]
             lora_scale = float(lora.get("lora_scale", 1.0))
 
@@ -287,7 +370,7 @@ class RCAITKSampler:
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "steps": ("INT", {"default": 25, "min": 1, "max": 200, "step": 1}),
                 "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 30.0, "step": 0.1}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 2**31 - 1}),
+                "seed": ("INT", {"default": 0, "min": -1, "max": 2**31 - 1}),
                 "denoise": (
                     "FLOAT",
                     {
@@ -338,34 +421,39 @@ class RCAITKSampler:
         # img2img: real latent data OR denoise<1.0
         do_txt2img = is_empty and denoise >= 1.0
 
-        if do_txt2img:
-            # Full txt2img: don't pass latents to pipeline
-            result = pipe.generate(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=int(width),
-                height=int(height),
-                num_inference_steps=int(steps),
-                guidance_scale=float(cfg),
-                seed=int(seed),
-                output_type="latent",
-                latents=None,
-                denoise_strength=1.0,
-            )
-        else:
-            # img2img/refine: pass latents to pipeline
-            result = pipe.generate(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=int(width),
-                height=int(height),
-                num_inference_steps=int(steps),
-                guidance_scale=float(cfg),
-                seed=int(seed),
-                output_type="latent",
-                latents=samples,
-                denoise_strength=float(denoise),
-            )
+        # Comfy-native progress + interrupt: wrap the run in a Comfy observer context.
+        # This is a no-op outside ComfyUI.
+        from src.pipelines.comfy_callbacks import comfy_pipeline_observer
+
+        with comfy_pipeline_observer(int(steps)):
+            if do_txt2img:
+                # Full txt2img: don't pass latents to pipeline
+                result = pipe.generate(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=int(width),
+                    height=int(height),
+                    num_inference_steps=int(steps),
+                    guidance_scale=float(cfg),
+                    seed=int(seed),
+                    output_type="latent",
+                    latents=None,
+                    denoise_strength=1.0,
+                )
+            else:
+                # img2img/refine: pass latents to pipeline
+                result = pipe.generate(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=int(width),
+                    height=int(height),
+                    num_inference_steps=int(steps),
+                    guidance_scale=float(cfg),
+                    seed=int(seed),
+                    output_type="latent",
+                    latents=samples,
+                    denoise_strength=float(denoise),
+                )
 
         out_latents = result.get("latents", None)
         if out_latents is None:
@@ -450,3 +538,104 @@ class RCAITKEncodeImage:
 
         out = torch.cat(latents, dim=0)
         return ({"samples": out},)
+
+
+class RCAITKGenerate:
+    """Generate images/video using a loaded pipeline.
+    
+    This is a unified generation node that works with any ai-toolkit pipeline.
+    For models that support latent workflow (SD15, SDXL, Qwen Image), you can
+    alternatively use the EmptyLatent -> Sampler -> Decode pattern for more control.
+    
+    Video models return IMAGE batches where the batch dimension is frames.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("AITK_PIPELINE",),
+                "prompt": ("STRING", {"multiline": True, "default": "a beautiful landscape, high quality, photorealistic"}),
+                "width": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 16}),
+                "height": ("INT", {"default": 1024, "min": 64, "max": 4096, "step": 16}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 200, "step": 1}),
+                "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 30.0, "step": 0.1}),
+                "seed": ("INT", {"default": 42, "min": -1, "max": 2**31 - 1}),
+            },
+            "optional": {
+                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "control_image": ("IMAGE",),
+                "control_image_2": ("IMAGE",),
+                "control_image_3": ("IMAGE",),
+                "num_frames": ("INT", {"default": 41, "min": 1, "max": 201, "tooltip": "For video models only"}),
+                "fps": ("INT", {"default": 16, "min": 1, "max": 120, "tooltip": "For video models only"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "generate"
+    CATEGORY = WORKFLOW_CATEGORY
+
+    def generate(
+        self,
+        pipe,
+        prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg: float,
+        seed: int,
+        negative_prompt: str = "",
+        control_image=None,
+        control_image_2=None,
+        control_image_3=None,
+        num_frames: int = 41,
+        fps: int = 16,
+    ):
+        # Convert control images from ComfyUI format to PIL
+        ctrl_img = None
+        ctrl_imgs = None
+        
+        if control_image is not None:
+            ctrl_img = comfy_to_pil_image(control_image)
+        
+        extras = []
+        if control_image_2 is not None:
+            extras.append(comfy_to_pil_image(control_image_2))
+        if control_image_3 is not None:
+            extras.append(comfy_to_pil_image(control_image_3))
+        
+        if extras:
+            base = [ctrl_img] if ctrl_img is not None else []
+            ctrl_imgs = base + extras
+
+        # Check if this is a video model
+        is_video = getattr(getattr(pipe, "CONFIG", None), "is_video", False)
+
+        # Comfy-native progress + interrupt
+        from src.pipelines.comfy_callbacks import comfy_pipeline_observer
+
+        with comfy_pipeline_observer(int(steps)):
+            result = pipe.generate(
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+                width=int(width),
+                height=int(height),
+                num_inference_steps=int(steps),
+                guidance_scale=float(cfg),
+                seed=int(seed),
+                control_image=ctrl_img,
+                control_images=ctrl_imgs,
+                num_frames=int(num_frames) if is_video else None,
+                fps=int(fps) if is_video else None,
+            )
+
+        # Handle result
+        if "image" in result:
+            return (pil_to_comfy_image(result["image"]),)
+
+        frames = result.get("frames")
+        if frames:
+            return (pil_frames_to_comfy_images(frames),)
+
+        raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")

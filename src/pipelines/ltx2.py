@@ -436,6 +436,8 @@ class LTX2Pipeline(BasePipeline):
             pipe = self.pipe
 
         # Run inference
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(common_kwargs, total_steps=num_inference_steps, pipe=pipe)
         video, audio = pipe(**common_kwargs)
 
         # video is numpy array [batch, frames, channels, height, width]

@@ -39,7 +39,7 @@ class TestSDXLLatentIntegration:
         """Load SDXL pipeline with CPU offload."""
         from src.pipelines.sdxl import SDXLPipeline
 
-        pipe = SDXLPipeline(device="cuda", enable_cpu_offload=True)
+        pipe = SDXLPipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         yield pipe
         try:
@@ -159,7 +159,7 @@ class TestSD15LatentIntegration:
         """Load SD15 pipeline with CPU offload."""
         from src.pipelines.sd15 import SD15Pipeline
 
-        pipe = SD15Pipeline(device="cuda", enable_cpu_offload=True)
+        pipe = SD15Pipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         yield pipe
         try:
@@ -218,7 +218,7 @@ class TestQwen2512LatentIntegration:
         """Load Qwen 2512 pipeline with CPU offload."""
         from src.pipelines.qwen_image import QwenImage2512Pipeline
 
-        pipe = QwenImage2512Pipeline(device="cuda", enable_cpu_offload=True)
+        pipe = QwenImage2512Pipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         yield pipe
         try:
@@ -380,7 +380,7 @@ class TestPipelineCacheIntegration:
         sdxl = get_or_load_pipeline(
             model_id="stabilityai/stable-diffusion-xl-base-1.0",
             pipeline_ctor=SDXLPipeline,
-            enable_cpu_offload=True,
+            offload_mode="model",
             hf_token=None,
             lora_paths=[],
             lora_scale=1.0,
@@ -391,7 +391,7 @@ class TestPipelineCacheIntegration:
         sd15 = get_or_load_pipeline(
             model_id="stabilityai/stable-diffusion-v1-5",
             pipeline_ctor=SD15Pipeline,
-            enable_cpu_offload=True,
+            offload_mode="model",
             hf_token=None,
             lora_paths=[],
             lora_scale=1.0,
@@ -430,7 +430,7 @@ class TestQwenUnloadIntegration:
         """Load Qwen 2512 pipeline for unload testing."""
         from src.pipelines.qwen_image import QwenImage2512Pipeline
 
-        pipe = QwenImage2512Pipeline(device="cuda", enable_cpu_offload=True)
+        pipe = QwenImage2512Pipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         yield pipe
         # Explicit unload to test the behavior
@@ -455,14 +455,14 @@ class TestQwenUnloadIntegration:
         # Verify cleanup
         assert pipe._img2img_pipe is None, "_img2img_pipe should be None after unload"
         assert pipe.pipe is None, "pipe should be None after unload"
-        assert pipe._using_sequential_offload is False, "sequential offload flag should be reset"
+        assert getattr(pipe, "_using_sequential_offload", False) is False, "sequential offload flag should be reset"
 
     @pytest.mark.integration
     def test_qwen_img2img_pipe_created_after_load(self):
         """Test that _img2img_pipe is created in load(), not _load_pipeline()."""
         from src.pipelines.qwen_image import QwenImage2512Pipeline
 
-        pipe = QwenImage2512Pipeline(device="cuda", enable_cpu_offload=True)
+        pipe = QwenImage2512Pipeline(device="cuda", offload_mode="model")
         
         # Before load, img2img should be None
         assert pipe._img2img_pipe is None
@@ -525,7 +525,7 @@ class TestResolutionDivisorSnapping:
         from src.pipelines.sdxl import SDXLPipeline
         import logging
         
-        pipe = SDXLPipeline(device="cuda", enable_cpu_offload=True)
+        pipe = SDXLPipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         
         try:
@@ -553,7 +553,7 @@ class TestResolutionDivisorSnapping:
         """Test that Qwen snaps non-divisible resolution."""
         from src.pipelines.qwen_image import QwenImage2512Pipeline
         
-        pipe = QwenImage2512Pipeline(device="cuda", enable_cpu_offload=True)
+        pipe = QwenImage2512Pipeline(device="cuda", offload_mode="model")
         pipe.load(lora_paths=[], lora_scale=1.0)
         
         try:

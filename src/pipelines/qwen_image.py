@@ -226,7 +226,7 @@ class QwenImagePipeline(BasePipeline):
         if self.pipe is None:
             raise RuntimeError("Pipeline not loaded")
 
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
 
         img_array = np.array(image.convert("RGB")).astype(np.float32) / 255.0
         img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
@@ -258,7 +258,7 @@ class QwenImagePipeline(BasePipeline):
         if self.pipe is None:
             raise RuntimeError("Pipeline not loaded")
 
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
         images = images.to(target_device, dtype=self.dtype)
         
         # Qwen VAE expects 5D input [B,C,1,H,W]
@@ -286,7 +286,7 @@ class QwenImagePipeline(BasePipeline):
         if self.pipe is None:
             raise RuntimeError("Pipeline not loaded")
 
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
 
         if latents.ndim == 3:
             # If someone passes packed latents, try to infer a square size.
@@ -339,7 +339,7 @@ class QwenImagePipeline(BasePipeline):
         if self.pipe is None:
             raise RuntimeError("Pipeline not loaded")
 
-        target_device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        target_device = self._get_execution_device()
 
         # Handle spatial latents [B,C,H,W] -> 5D [B,C,1,H,W]
         if latents.ndim == 4:
@@ -394,16 +394,19 @@ class QwenImagePipeline(BasePipeline):
 
         if latents is None:
             # Text-to-image
-            result = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                true_cfg_scale=guidance_scale,
-                generator=generator,
-                output_type=diffusers_out,
-            )
+            call_kwargs = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "width": width,
+                "height": height,
+                "num_inference_steps": num_inference_steps,
+                "true_cfg_scale": guidance_scale,
+                "generator": generator,
+                "output_type": diffusers_out,
+            }
+            # Comfy-native progress + interrupt (no-op unless an observer is installed).
+            self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps, pipe=self.pipe)
+            result = self.pipe(**call_kwargs)
 
             if output_type == "latent":
                 out = getattr(result, "images", None)
@@ -443,18 +446,21 @@ class QwenImagePipeline(BasePipeline):
 
         lat4d = self._ensure_target_latent_size(lat4d, height=height, width=width)
 
-        result = self._img2img_pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            image=lat4d,
-            strength=float(denoise_strength),
-            width=width,
-            height=height,
-            num_inference_steps=num_inference_steps,
-            true_cfg_scale=guidance_scale,
-            generator=generator,
-            output_type=diffusers_out,
-        )
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "image": lat4d,
+            "strength": float(denoise_strength),
+            "width": width,
+            "height": height,
+            "num_inference_steps": num_inference_steps,
+            "true_cfg_scale": guidance_scale,
+            "generator": generator,
+            "output_type": diffusers_out,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps, pipe=self._img2img_pipe)
+        result = self._img2img_pipe(**call_kwargs)
 
         # Optionally free memory after img2img inference (off by default)
         del lat4d
@@ -555,8 +561,8 @@ class QwenImageEditPipeline(BasePipeline):
         if control_image is None:
             raise ValueError("Qwen Image Edit requires a control image")
 
-        device = "cuda"
-        dtype = torch.bfloat16
+        device = self._get_execution_device()
+        dtype = self.dtype
 
         # Preprocess control image for prompt encoding (aligned with ai-toolkit)
         ctrl_tensor = self._preprocess_ctrl_for_encode(control_image, device, dtype)
@@ -580,18 +586,21 @@ class QwenImageEditPipeline(BasePipeline):
         # Resize control image for generation
         control_image = control_image.resize((width, height), Image.LANCZOS)
 
-        result = self.pipe(
-            image=control_image,
-            prompt_embeds=prompt_embeds,
-            prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=neg_prompt_embeds,
-            negative_prompt_embeds_mask=neg_prompt_embeds_mask,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            true_cfg_scale=guidance_scale,
-            generator=generator,
-        )
+        call_kwargs = {
+            "image": control_image,
+            "prompt_embeds": prompt_embeds,
+            "prompt_embeds_mask": prompt_embeds_mask,
+            "negative_prompt_embeds": neg_prompt_embeds,
+            "negative_prompt_embeds_mask": neg_prompt_embeds_mask,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "true_cfg_scale": guidance_scale,
+            "generator": generator,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps, pipe=self.pipe)
+        result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}
 
@@ -670,8 +679,8 @@ class QwenImageEditPlusPipeline(BasePipeline):
         if not images:
             raise ValueError("Qwen Image Edit Plus requires at least one control image")
 
-        device = "cuda"
-        dtype = torch.bfloat16
+        device = self._get_execution_device()
+        dtype = self.dtype
 
         # Preprocess control images for prompt encoding
         ctrl_tensors = [self._preprocess_ctrl_for_encode(img, device, dtype) for img in images]
@@ -693,18 +702,21 @@ class QwenImageEditPlusPipeline(BasePipeline):
         )
 
         # Run inference with pre-encoded prompts
-        result = self.pipe(
-            image=images,
-            prompt_embeds=prompt_embeds,
-            prompt_embeds_mask=prompt_embeds_mask,
-            negative_prompt_embeds=neg_prompt_embeds,
-            negative_prompt_embeds_mask=neg_prompt_embeds_mask,
-            generator=generator,
-            true_cfg_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            height=height,
-            width=width,
-        )
+        call_kwargs = {
+            "image": images,
+            "prompt_embeds": prompt_embeds,
+            "prompt_embeds_mask": prompt_embeds_mask,
+            "negative_prompt_embeds": neg_prompt_embeds,
+            "negative_prompt_embeds_mask": neg_prompt_embeds_mask,
+            "generator": generator,
+            "true_cfg_scale": guidance_scale,
+            "num_inference_steps": num_inference_steps,
+            "height": height,
+            "width": width,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps, pipe=self.pipe)
+        result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}
 

@@ -22,6 +22,7 @@ class TestSettings:
             assert settings.port == 8000
             assert settings.debug is False
             assert settings.device == "cuda"
+            assert settings.offload_mode == "none"
             assert settings.enable_cpu_offload is False
             assert settings.workflows_base_path == "/app/ai-toolkit/lora_weights"
             assert settings.output_base_path == "/tmp/inference_output"
@@ -35,6 +36,7 @@ class TestSettings:
             "PORT": "9000",
             "DEBUG": "true",
             "DEVICE": "cpu",
+            "OFFLOAD_MODE": "model",
             "WORKFLOWS_BASE_PATH": "/custom/workflows",
             "OUTPUT_BASE_PATH": "/custom/output",
             "AI_TOOLKIT_PATH": "/custom/ai-toolkit",
@@ -50,6 +52,7 @@ class TestSettings:
             assert settings.port == 9000
             assert settings.debug is True
             assert settings.device == "cpu"
+            assert settings.offload_mode == "model"
             assert settings.workflows_base_path == "/custom/workflows"
             assert settings.output_base_path == "/custom/output"
             assert settings.ai_toolkit_path == "/custom/ai-toolkit"
