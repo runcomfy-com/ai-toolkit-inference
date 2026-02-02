@@ -9,6 +9,7 @@ import torch
 from PIL import Image
 
 from .base import BasePipeline, PipelineConfig, LoraMergeMethod
+from .latent_mixins import SDLatentMixin
 from ..schemas.models import ModelType
 
 # Lazy imports - diffusers is only imported when actually needed
@@ -17,7 +18,7 @@ from ..schemas.models import ModelType
 logger = logging.getLogger(__name__)
 
 
-class SDXLPipeline(BasePipeline):
+class SDXLPipeline(SDLatentMixin, BasePipeline):
     """
     Stable Diffusion XL pipeline.
 
@@ -65,90 +66,6 @@ class SDXLPipeline(BasePipeline):
             }
         )
 
-    def encode_image_to_latent(self, image: Image.Image) -> torch.Tensor:
-        """Encode a PIL image to latent space using the VAE."""
-        import numpy as np
-
-        target_device = self._get_execution_device()
-
-        # Convert PIL to tensor [B, C, H, W] in [-1, 1]
-        img_array = np.array(image.convert("RGB")).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
-        img_tensor = (img_tensor * 2.0 - 1.0).to(target_device, dtype=self.dtype)
-
-        # Move VAE to GPU explicitly only for model offload mode.
-        # In sequential mode, hooks handle device placement automatically.
-        # In none mode, VAE is already on GPU.
-        if self.offload_mode == "model":
-            self.pipe.vae.to(target_device)
-
-        # Encode to latent
-        with torch.no_grad():
-            latent = self.pipe.vae.encode(img_tensor).latent_dist.sample()
-            latent = latent * self.pipe.vae.config.scaling_factor
-
-        return latent
-
-    def encode_images_to_latents(self, images: torch.Tensor) -> torch.Tensor:
-        """Batch encode images [B,C,H,W] in [-1,1] to latents [B,C,H/8,W/8].
-        
-        This is more efficient than looping encode_image_to_latent for batches.
-        """
-        target_device = self._get_execution_device()
-        images = images.to(target_device, dtype=self.dtype)
-
-        # Move VAE to GPU explicitly only for model offload mode.
-        if self.offload_mode == "model":
-            self.pipe.vae.to(target_device)
-
-        with torch.no_grad():
-            latents = self.pipe.vae.encode(images).latent_dist.sample()
-            latents = latents * self.pipe.vae.config.scaling_factor
-
-        return latents
-
-    def decode_latent_to_image(self, latents: torch.Tensor) -> Image.Image:
-        """Decode latents to PIL image using the VAE."""
-        import numpy as np
-
-        target_device = self._get_execution_device()
-        latents = latents.to(target_device, dtype=self.dtype)
-        latents = latents / self.pipe.vae.config.scaling_factor
-
-        # Move VAE to GPU explicitly only for model offload mode.
-        if self.offload_mode == "model":
-            self.pipe.vae.to(target_device)
-
-        with torch.no_grad():
-            image = self.pipe.vae.decode(latents).sample
-
-        # Convert to PIL
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.float().cpu().permute(0, 2, 3, 1).numpy()[0]
-        image = (image * 255).astype(np.uint8)
-        return Image.fromarray(image)
-
-    def decode_latents_to_images(self, latents: torch.Tensor) -> torch.Tensor:
-        """Batch decode latents [B,C,H/8,W/8] to images [B,C,H,W] in [0,1].
-        
-        This is more efficient than looping decode_latent_to_image for batches.
-        Returns tensor in [0,1] range with shape [B,C,H,W].
-        """
-        target_device = self._get_execution_device()
-        latents = latents.to(target_device, dtype=self.dtype)
-        latents = latents / self.pipe.vae.config.scaling_factor
-
-        # Move VAE to GPU explicitly only for model offload mode.
-        if self.offload_mode == "model":
-            self.pipe.vae.to(target_device)
-
-        with torch.no_grad():
-            images = self.pipe.vae.decode(latents).sample
-
-        # Convert from [-1,1] to [0,1]
-        images = (images / 2 + 0.5).clamp(0, 1)
-        return images
-
     def _run_inference(
         self,
         prompt: str,
@@ -169,29 +86,41 @@ class SDXLPipeline(BasePipeline):
         """Run SDXL inference with latent support."""
         # Handle latent input for img2img-style refinement
         if latents is not None:
+            if denoise_strength <= 0:
+                # No-op refinement: return input latents directly if requested
+                if output_type == "latent":
+                    return {"latents": latents}
+                if hasattr(self, "decode_latent_to_image"):
+                    return {"image": self.decode_latent_to_image(latents)}
+
             # Add noise to latents based on denoise_strength
             latents = latents.to(self.pipe.device, dtype=self.dtype)
 
             # Calculate the starting timestep based on denoise_strength
             init_timestep = min(int(num_inference_steps * denoise_strength), num_inference_steps)
+            if init_timestep == 0:
+                # No effective denoising steps -> return input directly
+                if output_type == "latent":
+                    return {"latents": latents}
+                if hasattr(self, "decode_latent_to_image"):
+                    return {"image": self.decode_latent_to_image(latents)}
 
             # Get timesteps
             self.pipe.scheduler.set_timesteps(num_inference_steps, device=self.pipe.device)
             timesteps = self.pipe.scheduler.timesteps
 
             # Add noise to input latents
-            if denoise_strength < 1.0:
-                t_start = max(num_inference_steps - init_timestep, 0)
-                timesteps = timesteps[t_start:]
+            t_start = max(num_inference_steps - init_timestep, 0)
+            timesteps = timesteps[t_start:]
 
-                # Generate noise on CPU then move to device (generator compatibility)
-                noise = torch.randn(
-                    latents.shape,
-                    generator=generator,
-                    dtype=torch.float32,
-                    device="cpu",
-                ).to(device=latents.device, dtype=latents.dtype)
-                latents = self.pipe.scheduler.add_noise(latents, noise, timesteps[:1])
+            # Generate noise on CPU then move to device (generator compatibility)
+            noise = torch.randn(
+                latents.shape,
+                generator=generator,
+                dtype=torch.float32,
+                device="cpu",
+            ).to(device=latents.device, dtype=latents.dtype)
+            latents = self.pipe.scheduler.add_noise(latents, noise, timesteps[:1])
 
         # Determine output type for diffusers
         diffusers_output_type = "latent" if output_type == "latent" else "pil"
@@ -210,9 +139,9 @@ class SDXLPipeline(BasePipeline):
 
         if latents is not None:
             call_kwargs["latents"] = latents
-            # Adjust steps for img2img
-            if denoise_strength < 1.0:
-                call_kwargs["num_inference_steps"] = num_inference_steps
+            # Pass explicit timesteps so denoise_strength takes effect (diffusers resets timesteps internally).
+            call_kwargs["timesteps"] = timesteps
+            # num_inference_steps already set above
 
         # Comfy-native progress + interrupt (no-op unless an observer is installed).
         self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)

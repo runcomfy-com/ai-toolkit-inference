@@ -51,6 +51,30 @@ def _tensor_to_comfy_batch(t: torch.Tensor) -> torch.Tensor:
     return t.permute(0, 2, 3, 1).float().cpu()
 
 
+def _latent_metadata_from_pipe(pipe, samples=None, *, width=None, height=None) -> dict:
+    """Best-effort latent metadata (non-fatal if unavailable)."""
+    if hasattr(pipe, "latent_metadata") and callable(getattr(pipe, "latent_metadata")):
+        try:
+            return pipe.latent_metadata(samples, width=width, height=height)
+        except Exception:
+            return {}
+    return {}
+
+
+def _validate_latent_compat(pipe, latent: dict) -> None:
+    """Validate latent metadata against the target pipeline (if metadata is present)."""
+    if not isinstance(latent, dict):
+        return
+
+    meta_type = latent.get("aitk_model_type")
+    cfg = getattr(pipe, "CONFIG", None)
+    pipe_type = getattr(cfg, "model_type", None)
+    pipe_type_val = getattr(pipe_type, "value", None) if pipe_type is not None else None
+
+    if meta_type and pipe_type_val and meta_type != pipe_type_val:
+        raise ValueError(f"Latent model_type mismatch: latent={meta_type}, pipe={pipe_type_val}")
+
+
 class RCAITKLoRA:
     """Helper node: select a LoRA file from ComfyUI's loras folder."""
 
@@ -340,13 +364,14 @@ class RCAITKEmptyLatent:
             (batch_size, lat_channels, lat_h, lat_w),
             dtype=torch.float32,
         )
-        
+
+        meta = _latent_metadata_from_pipe(pipe, samples, width=width, height=height)
+
         # Return with marker indicating this is an "empty" latent for txt2img
         return ({
             "samples": samples,
             "aitk_empty": True,
-            "aitk_width": width,
-            "aitk_height": height,
+            **meta,
         },)
 
 
@@ -402,6 +427,8 @@ class RCAITKSampler:
         samples = latent.get("samples", None)
         if samples is None:
             raise ValueError("LATENT input is missing 'samples'")
+
+        _validate_latent_compat(pipe, latent)
 
         is_empty = latent.get("aitk_empty", False)
         
@@ -460,7 +487,11 @@ class RCAITKSampler:
             raise ValueError("Pipeline did not return 'latents'")
 
         # Return clean latent dict (no markers)
-        return ({"samples": out_latents},)
+        meta = _latent_metadata_from_pipe(pipe, out_latents, width=width, height=height)
+        return ({
+            "samples": out_latents,
+            **meta,
+        },)
 
 
 class RCAITKDecodeLatent:
@@ -486,6 +517,8 @@ class RCAITKDecodeLatent:
         lat = latent.get("samples", None)
         if lat is None:
             raise ValueError("LATENT input is missing 'samples'")
+
+        _validate_latent_compat(pipe, latent)
 
         # Use batch decode if available (more efficient for batches)
         if hasattr(pipe, "decode_latents_to_images"):
@@ -522,12 +555,16 @@ class RCAITKEncodeImage:
     CATEGORY = WORKFLOW_CATEGORY
 
     def encode(self, pipe, image):
+        width = int(image.shape[2]) if hasattr(image, "shape") else None
+        height = int(image.shape[1]) if hasattr(image, "shape") else None
+
         # Use batch encode if available (more efficient for batches)
         if hasattr(pipe, "encode_images_to_latents"):
             # Convert ComfyUI [B,H,W,C] in [0,1] to model [B,C,H,W] in [-1,1]
             img_tensor = _comfy_batch_to_tensor(image)
             latents = pipe.encode_images_to_latents(img_tensor)
-            return ({"samples": latents},)
+            meta = _latent_metadata_from_pipe(pipe, latents, width=width, height=height)
+            return ({"samples": latents, **meta},)
 
         # Fallback: encode each image separately
         pil_list = _comfy_batch_to_pil_list(image)
@@ -537,7 +574,8 @@ class RCAITKEncodeImage:
             latents.append(lat)
 
         out = torch.cat(latents, dim=0)
-        return ({"samples": out},)
+        meta = _latent_metadata_from_pipe(pipe, out, width=width, height=height)
+        return ({"samples": out, **meta},)
 
 
 class RCAITKGenerate:
