@@ -1,26 +1,39 @@
 {
   "1": {
     "inputs": {
+      "pipeline": "zimage_turbo",
+      "offload_mode": "model",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "Load Z-Image Turbo Pipeline"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": ["1", 0],
       "prompt": "sunhoz, Korean teenage boy, close up portrait, smooth fair Korean skin, textured black hair with natural flow, symmetrical oval face, defined youthful jawline, striking bright blue almond shaped eyes, calm confident expression, realistic pores, natural skin texture, head and shoulders framing, soft natural lighting, shallow depth of field, photographic realism",
       "negative_prompt": "",
       "width": 1024,
       "height": 1024,
-      "sample_steps": 8,
-      "guidance_scale": 1,
-      "seed": 42,
-      "lora_path": "",
-      "lora_scale": 1.0
+      "steps": 8,
+      "cfg": 1.0,
+      "seed": 42
     },
-    "class_type": "RCZimageTurbo"
+    "class_type": "RCAITKGenerate",
+    "_meta": {
+      "title": "Generate"
+    }
   },
-  "2": {
+  "3": {
     "inputs": {
       "filename_prefix": "rc_zimage_turbo",
-      "images": [
-        "1",
-        0
-      ]
+      "images": ["2", 0]
     },
-    "class_type": "SaveImage"
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
   }
 }

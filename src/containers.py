@@ -26,8 +26,10 @@ class Container(containers.DeclarativeContainer):
     pipeline_manager = providers.Singleton(
         PipelineManager,
         device=config.provided.device,
-        enable_cpu_offload=config.provided.enable_cpu_offload,
+        offload_mode=config.provided.offload_mode,
         lora_download_cache_dir=config.provided.lora_download_cache_dir,
+        # Deprecated: kept for backwards compatibility
+        enable_cpu_offload=config.provided.enable_cpu_offload,
     )
 
     # Inference executor

@@ -1,28 +1,41 @@
 {
   "1": {
     "inputs": {
+      "pipeline": "ltx2",
+      "offload_mode": "model",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "Load LTX-2 Pipeline"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": ["1", 0],
       "prompt": "a beautiful landscape, high quality, photorealistic",
       "negative_prompt": "",
       "width": 1024,
       "height": 1024,
-      "sample_steps": 25,
-      "guidance_scale": 4.0,
+      "steps": 25,
+      "cfg": 4.0,
       "seed": 42,
-      "lora_path": "",
-      "lora_scale": 1.0,
       "num_frames": 41,
       "fps": 24
     },
-    "class_type": "RCLTX2"
+    "class_type": "RCAITKGenerate",
+    "_meta": {
+      "title": "Generate Video"
+    }
   },
-  "2": {
+  "3": {
     "inputs": {
       "filename_prefix": "rc_ltx2",
-      "images": [
-        "1",
-        0
-      ]
+      "images": ["2", 0]
     },
-    "class_type": "SaveImage"
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Frames"
+    }
   }
 }

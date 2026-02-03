@@ -32,6 +32,17 @@ from .rc_models import (
     RCWan22TI2V5B,
 )
 
+# Latent workflow nodes
+from .rc_latent_workflow import (
+    RCAITKLoRA,
+    RCAITKLoadPipeline,
+    RCAITKEmptyLatent,
+    RCAITKSampler,
+    RCAITKDecodeLatent,
+    RCAITKEncodeImage,
+    RCAITKGenerate,
+)
+
 NODE_CLASS_MAPPINGS = {
     # Z-Image
     "RCZimage": RCZimage,
@@ -76,6 +87,15 @@ NODE_CLASS_MAPPINGS = {
     "RCWan22T2V14B": RCWan22T2V14B,
     "RCWan22I2V14B": RCWan22I2V14B,
     "RCWan22TI2V5B": RCWan22TI2V5B,
+
+    # Latent workflow nodes
+    "RCAITKLoRA": RCAITKLoRA,
+    "RCAITKLoadPipeline": RCAITKLoadPipeline,
+    "RCAITKEmptyLatent": RCAITKEmptyLatent,
+    "RCAITKSampler": RCAITKSampler,
+    "RCAITKDecodeLatent": RCAITKDecodeLatent,
+    "RCAITKEncodeImage": RCAITKEncodeImage,
+    "RCAITKGenerate": RCAITKGenerate,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -115,6 +135,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCWan22T2V14B": "RC Wan 2.2 T2V 14B",
     "RCWan22I2V14B": "RC Wan 2.2 I2V 14B",
     "RCWan22TI2V5B": "RC Wan 2.2 TI2V 5B",
+
+    # Latent workflow nodes
+    "RCAITKLoRA": "RC AITK LoRA",
+    "RCAITKLoadPipeline": "RC AITK Load Pipeline",
+    "RCAITKEmptyLatent": "RC AITK Empty Latent",
+    "RCAITKSampler": "RC AITK Sampler",
+    "RCAITKDecodeLatent": "RC AITK Decode Latent",
+    "RCAITKEncodeImage": "RC AITK Encode Image",
+    "RCAITKGenerate": "RC AITK Generate",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

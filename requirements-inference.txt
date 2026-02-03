@@ -21,7 +21,7 @@ tensorboard
 kornia
 invisible-watermark
 einops
-accelerate
+accelerate>=0.26.0
 toml
 albumentations==1.4.15
 albucore==0.0.16

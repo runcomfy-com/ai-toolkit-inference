@@ -3,8 +3,9 @@ Configuration management for inference server.
 """
 
 import os
+from typing import Literal, Optional
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 def _get_default_ai_toolkit_path() -> str:
@@ -54,6 +55,15 @@ class Settings(BaseSettings):
 
     # Device settings
     device: str = Field(default="cuda", alias="DEVICE")
+
+    # CPU offload mode: "none", "model", or "sequential"
+    # - "none": No offload, model stays on GPU (fastest inference, highest VRAM)
+    # - "model": Model CPU offload - moves full model between CPU/GPU (balanced)
+    # - "sequential": Sequential CPU offload - moves layers one at a time (lowest VRAM, slowest)
+    offload_mode: Literal["none", "model", "sequential"] = Field(default="none", alias="OFFLOAD_MODE")
+
+    # Deprecated: use offload_mode instead. Kept for backwards compatibility.
+    # If set to True and offload_mode is not explicitly set, will use "model" mode.
     enable_cpu_offload: bool = Field(default=False, alias="ENABLE_CPU_OFFLOAD")
 
     # Model cache settings

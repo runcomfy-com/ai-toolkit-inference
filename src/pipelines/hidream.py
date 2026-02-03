@@ -211,17 +211,21 @@ class HiDreamPipeline(BasePipeline):
         num_frames: int = 1,
         fps: int = 16,
     ) -> Dict[str, Any]:
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "max_sequence_length": 128,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            result = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                max_sequence_length=128,
-            )
+            result = self.pipe(**call_kwargs)
         return {"image": result.images[0]}
 
     def unload(self):
@@ -405,19 +409,23 @@ class HiDreamE1Pipeline(BasePipeline):
         if control_image.size != (width, height):
             control_image = control_image.resize((width, height), Image.BILINEAR)
 
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "image": control_image,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "image_guidance_scale": 4.0,
+            "generator": generator,
+            "max_sequence_length": 128,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            result = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                image=control_image,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                image_guidance_scale=4.0,
-                generator=generator,
-                max_sequence_length=128,
-            )
+            result = self.pipe(**call_kwargs)
         return {"image": result.images[0]}
 
     def unload(self):

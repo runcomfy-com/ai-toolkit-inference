@@ -112,6 +112,53 @@ They expose `num_frames` and `fps` as optional inputs.
 
 (Instead of the single `lora_path` / `lora_scale` inputs.)
 
+### Latent workflow nodes (AITK)
+
+For advanced workflows with latent manipulation (upscale + second pass, etc.), use these nodes under `RunComfy-Inference/Workflow`:
+
+#### Core nodes
+
+- **`RCAITKLoRA`** - Create a LoRA configuration object
+  - Select from ComfyUI's `models/loras` dropdown, or provide a path/URL
+  - Outputs `AITK_LORA` to connect to `RCAITKLoadPipeline`
+
+- **`RCAITKLoadPipeline`** - Load a pipeline with optional LoRA
+  - Supports: SD 1.5, SDXL, Qwen Image, Qwen Image 2512
+  - Outputs `AITK_PIPELINE` for use with sampler/decode nodes
+
+- **`RCAITKEmptyLatent`** - Create an empty latent (like ComfyUI's EmptyLatentImage)
+  - Inputs: `pipe`, `width`, `height`, `batch_size`
+  - Outputs `LATENT` for use with `RCAITKSampler`
+  - Width/height are auto-snapped to the model's resolution divisor
+
+- **`RCAITKSampler`** - Sample latents (requires LATENT input)
+  - Always takes a `LATENT` input (use `RCAITKEmptyLatent` for txt2img)
+  - Width/height inferred from latent shape
+  - `denoise=1.0` with empty latent = txt2img
+  - `denoise<1.0` or real latent input = img2img/refine
+
+- **`RCAITKDecodeLatent`** - Decode latents to images
+  - Uses the pipeline's VAE to decode `LATENT` → `IMAGE`
+  - Batch-aware: efficiently decodes entire batches in one VAE pass
+
+- **`RCAITKEncodeImage`** - Encode images to latents
+  - Useful for starting img2img workflows from an existing image
+  - Batch-aware: efficiently encodes entire batches in one VAE pass
+
+#### Recommended workflow pattern
+
+This mirrors the standard ComfyUI `EmptyLatentImage → KSampler` pattern:
+
+```
+RCAITKLoadPipeline → RCAITKEmptyLatent → RCAITKSampler (1st pass)
+                                                ↓
+                                         LatentUpscale (ComfyUI built-in)
+                                                ↓
+                              RCAITKSampler (denoise=0.33) → RCAITKDecodeLatent → IMAGE
+```
+
+See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
+
 ## Available nodes (class types)
 
 - Z-Image:
@@ -150,6 +197,13 @@ They expose `num_frames` and `fps` as optional inputs.
   - `RCWan22T2V14B`
   - `RCWan22I2V14B`
   - `RCWan22TI2V5B`
+- Latent Workflow (AITK):
+  - `RCAITKLoRA`
+  - `RCAITKLoadPipeline`
+  - `RCAITKEmptyLatent`
+  - `RCAITKSampler`
+  - `RCAITKDecodeLatent`
+  - `RCAITKEncodeImage`
 
 ## Example workflows
 
@@ -162,6 +216,11 @@ Minimal example workflows are provided in `example_workflows/`:
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.
 
+**Latent workflow examples** (upscale + second pass):
+
+- `example_workflows/rc_aitk_sdxl_latent_upscale.json` - SDXL with latent upscale and 0.33 denoise refinement
+- `example_workflows/rc_aitk_qwen2512_latent_upscale.json` - Qwen Image 2512 with latent upscale and refinement
+
 Workflows that require a control image use a `LoadImage` node referencing `aitk_control.png`.
 Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to match your filename).
 
@@ -169,7 +228,8 @@ Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to m
 
 - Node registration: `comfyui_nodes/__init__.py`
 - Node implementations:
-  - `comfyui_nodes/rc_models.py` (all catalog nodes)
+  - `comfyui_nodes/rc_models.py` (all one-shot catalog nodes)
+  - `comfyui_nodes/rc_latent_workflow.py` (AITK latent workflow nodes)
   - `comfyui_nodes/rc_common.py` (shared helpers)
 
 ## Notes / common issues

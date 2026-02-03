@@ -1,0 +1,90 @@
+{
+  "1": {
+    "inputs": {
+      "pipeline": "sdxl",
+      "offload_mode": "model",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "AITK Load Pipeline (SDXL)"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "width": 512,
+      "height": 512,
+      "batch_size": 1
+    },
+    "class_type": "RCAITKEmptyLatent",
+    "_meta": {
+      "title": "AITK Empty Latent (512x512)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "latent": ["2", 0],
+      "prompt": "a beautiful mountain landscape at sunset, photorealistic, 8k",
+      "negative_prompt": "blurry, low quality, artifacts",
+      "steps": 20,
+      "cfg": 7.5,
+      "seed": 42,
+      "denoise": 1.0
+    },
+    "class_type": "RCAITKSampler",
+    "_meta": {
+      "title": "AITK Sampler (Initial txt2img)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "upscale_method": "bilinear",
+      "width": 1024,
+      "height": 1024,
+      "crop": "disabled",
+      "samples": ["3", 0]
+    },
+    "class_type": "LatentUpscale",
+    "_meta": {
+      "title": "Latent Upscale (2x to 1024x1024)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "latent": ["4", 0],
+      "prompt": "a beautiful mountain landscape at sunset, photorealistic, 8k, highly detailed",
+      "negative_prompt": "blurry, low quality, artifacts",
+      "steps": 20,
+      "cfg": 7.5,
+      "seed": 42,
+      "denoise": 0.4
+    },
+    "class_type": "RCAITKSampler",
+    "_meta": {
+      "title": "AITK Sampler (Refine at 0.4 denoise)"
+    }
+  },
+  "6": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "latent": ["5", 0]
+    },
+    "class_type": "RCAITKDecodeLatent",
+    "_meta": {
+      "title": "AITK Decode Latent"
+    }
+  },
+  "7": {
+    "inputs": {
+      "filename_prefix": "sdxl_latent_upscale",
+      "images": ["6", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}

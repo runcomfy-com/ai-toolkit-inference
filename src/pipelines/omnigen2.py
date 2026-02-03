@@ -285,20 +285,23 @@ class OmniGen2Pipeline(BasePipeline):
         if neg:
             neg = self.pipe._apply_chat_template(neg)
 
-        result = self.pipe(
-            prompt=prompt,
-            negative_prompt=neg,
-            input_images=input_images,
-            height=height,
-            width=width,
-            num_inference_steps=num_inference_steps,
-            text_guidance_scale=guidance_scale,
-            image_guidance_scale=1.0,  # Default, can be exposed later
-            generator=generator,
-            align_res=False,  # Use specified resolution
-            max_sequence_length=256,  # Match training (explicit 256)
-            return_dict=True,
-        )
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": neg,
+            "input_images": input_images,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "text_guidance_scale": guidance_scale,
+            "image_guidance_scale": 1.0,  # Default, can be exposed later
+            "generator": generator,
+            "align_res": False,  # Use specified resolution
+            "max_sequence_length": 256,  # Match training (explicit 256)
+            "return_dict": True,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}
 

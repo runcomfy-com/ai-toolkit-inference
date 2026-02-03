@@ -685,19 +685,22 @@ class Wan22I2V14BPipeline(BasePipeline):
                     extra_kwargs["callback_on_step_end_tensor_inputs"] = []
 
         # Run inference
-        result = self.pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt or "",
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            latents=conditioned_latent,  # With first frame conditioning
-            generator=generator,
-            output_type="pil",
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "latents": conditioned_latent,  # With first frame conditioning
+            "generator": generator,
+            "output_type": "pil",
             **extra_kwargs,
-        )
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         frames = result.frames[0] if hasattr(result, "frames") else result.images
 

@@ -98,7 +98,7 @@ class Wan22TI2V5BPipeline(BasePipeline):
         from extensions_built_in.diffusion_models.wan22.wan22_pipeline import Wan22Pipeline
         from toolkit.basic import flush
 
-        dtype = torch.bfloat16
+        dtype = self.dtype
 
         # Load VAE
         vae = AutoencoderKLWan.from_pretrained(
@@ -251,19 +251,22 @@ class Wan22TI2V5BPipeline(BasePipeline):
             # T2V mode: standard text-to-video
             logger.info("Running T2V inference")
 
-        result = self.pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            latents=latents,
-            noise_mask=noise_mask,
-            output_type="pil",
-        )
+        call_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "latents": latents,
+            "noise_mask": noise_mask,
+            "output_type": "pil",
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+        result = self.pipe(**call_kwargs)
 
         frames = result.frames[0] if hasattr(result, "frames") else result.images
 

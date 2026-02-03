@@ -63,6 +63,8 @@ class _RCAitkBase:
     # defaults
     DEFAULT_WIDTH: int = 1024
     DEFAULT_HEIGHT: int = 1024
+    # UI snapping step for width/height. Should match the model's resolution divisor.
+    RESOLUTION_STEP: int = 16
     DEFAULT_STEPS: int = 25
     DEFAULT_GUIDANCE: float = 4.0
     DEFAULT_SEED: int = 42
@@ -81,21 +83,25 @@ class _RCAitkBase:
     DEFAULT_NUM_FRAMES: int = 41
     DEFAULT_FPS: int = 16
 
-    # pipeline loading
-    ENABLE_CPU_OFFLOAD: bool = False
+    # pipeline loading - default offload mode for this model class
+    DEFAULT_OFFLOAD_MODE: str = "none"
 
     @classmethod
     def INPUT_TYPES(cls):
         req = {
             "prompt": ("STRING", {"multiline": True, "default": "a beautiful landscape"}),
-            "width": ("INT", {"default": cls.DEFAULT_WIDTH, "min": 64, "max": 4096, "step": 16}),
-            "height": ("INT", {"default": cls.DEFAULT_HEIGHT, "min": 64, "max": 4096, "step": 16}),
+            "width": ("INT", {"default": cls.DEFAULT_WIDTH, "min": 64, "max": 4096, "step": int(cls.RESOLUTION_STEP)}),
+            "height": ("INT", {"default": cls.DEFAULT_HEIGHT, "min": 64, "max": 4096, "step": int(cls.RESOLUTION_STEP)}),
             "sample_steps": ("INT", {"default": cls.DEFAULT_STEPS, "min": 1, "max": 150}),
             "guidance_scale": ("FLOAT", {"default": float(cls.DEFAULT_GUIDANCE), "min": 0.0, "max": 20.0, "step": 0.1}),
             "seed": ("INT", {"default": cls.DEFAULT_SEED, "min": -1, "max": 0x7FFFFFFF}),
         }
 
         opt = {
+            "offload_mode": (
+                ["none", "model", "sequential"],
+                {"default": cls.DEFAULT_OFFLOAD_MODE, "tooltip": "CPU offload strategy: none=full VRAM, model=lower VRAM, sequential=lowest VRAM (slowest)"},
+            ),
             "lora_path": ("STRING", {"default": "", "tooltip": "LoRA local path or URL (single LoRA only)"}),
             "lora_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
             "hf_token": ("STRING", {"default": ""}),
@@ -195,10 +201,13 @@ class _RCAitkBase:
         num_frames = int(kwargs.get("num_frames", self.DEFAULT_NUM_FRAMES)) if self.IS_VIDEO else None
         fps = int(kwargs.get("fps", self.DEFAULT_FPS)) if self.IS_VIDEO else None
 
+        # Get offload_mode from input or use class default
+        offload_mode = kwargs.get("offload_mode", self.DEFAULT_OFFLOAD_MODE)
+
         pipe = get_or_load_pipeline(
             model_id=self.MODEL_ID,
             pipeline_ctor=self._pipeline_ctor(),
-            enable_cpu_offload=self.ENABLE_CPU_OFFLOAD,
+            offload_mode=offload_mode,
             hf_token=hf_token,
             lora_paths=lora_paths,
             lora_scale=lora_scale_value,
@@ -215,10 +224,7 @@ class _RCAitkBase:
             # Match BasePipeline.generate seed handling.
             if seed < 0:
                 seed = torch.randint(0, 2147483647, (1,)).item()
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed(seed)
-            generator = torch.manual_seed(seed)
+            generator = torch.Generator(device="cpu").manual_seed(int(seed))
 
             # Build control_img_list like the Flux2Pipeline wrapper does.
             control_img_list = []
@@ -266,19 +272,24 @@ class _RCAitkBase:
                 raise ValueError("FLUX.2 vendor pipeline returned no images")
             return (pil_to_comfy_image(img0),)
 
-        result = pipe.generate(
-            prompt=prompt,
-            negative_prompt=negative_prompt or "",
-            width=width,
-            height=height,
-            num_inference_steps=sample_steps,
-            guidance_scale=guidance_scale,
-            seed=seed,
-            control_image=control_image,
-            control_images=control_images,
-            num_frames=num_frames,
-            fps=fps,
-        )
+        # Comfy-native progress + interrupt: wrap the run in a Comfy observer context.
+        # This is a no-op outside ComfyUI.
+        from src.pipelines.comfy_callbacks import comfy_pipeline_observer
+
+        with comfy_pipeline_observer(int(sample_steps)):
+            result = pipe.generate(
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+                width=width,
+                height=height,
+                num_inference_steps=sample_steps,
+                guidance_scale=guidance_scale,
+                seed=seed,
+                control_image=control_image,
+                control_images=control_images,
+                num_frames=num_frames,
+                fps=fps,
+            )
 
         if "image" in result:
             return (pil_to_comfy_image(result["image"]),)
@@ -297,6 +308,7 @@ class RCZimage(_RCAitkBase):
     DISPLAY_NAME = "RC Z-Image"
     DEFAULT_STEPS = 30
     DEFAULT_GUIDANCE = 4.0
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage import ZImagePipeline
@@ -308,6 +320,7 @@ class RCZimageTurbo(_RCAitkBase):
     DISPLAY_NAME = "RC Z-Image Turbo"
     DEFAULT_STEPS = 8
     DEFAULT_GUIDANCE = 1.0
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage_turbo import ZImageTurboPipeline
@@ -319,6 +332,7 @@ class RCZimageDeturbo(_RCAitkBase):
     DISPLAY_NAME = "RC Z-Image De-Turbo"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 3.0
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage_deturbo import ZImageDeturboPipeline
@@ -408,6 +422,7 @@ class RCFlex1(_RCAitkBase):
 class RCFlex2(_RCAitkBase):
     MODEL_ID = "flex2"
     DISPLAY_NAME = "RC Flex.2"
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.flex2 import Flex2Pipeline
@@ -458,6 +473,7 @@ class RCQwenImageEdit(_RCAitkBase):
     DISPLAY_NAME = "RC Qwen Image Edit"
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 1
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.qwen_image import QwenImageEditPipeline
@@ -469,6 +485,7 @@ class RCQwenImageEditPlus(_RCAitkBase):
     DISPLAY_NAME = "RC Qwen Image Edit Plus"
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 3
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.qwen_image import QwenImageEditPlus2509Pipeline
@@ -480,6 +497,7 @@ class RCQwenImageEditPlus2511(_RCAitkBase):
     DISPLAY_NAME = "RC Qwen Image Edit Plus 2511"
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 3
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.qwen_image import QwenImageEditPlus2511Pipeline
@@ -489,6 +507,7 @@ class RCQwenImageEditPlus2511(_RCAitkBase):
 class RCChroma(_RCAitkBase):
     MODEL_ID = "chroma"
     DISPLAY_NAME = "RC Chroma"
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.chroma import ChromaPipeline
@@ -522,6 +541,7 @@ class RCHiDreamE1(_RCAitkBase):
 class RCLumina2(_RCAitkBase):
     MODEL_ID = "lumina2"
     DISPLAY_NAME = "RC Lumina2"
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.lumina2 import Lumina2Pipeline
@@ -544,7 +564,8 @@ class RCLTX2(_RCAitkBase):
     DISPLAY_NAME = "RC LTX-2"
     IS_VIDEO = True
     DEFAULT_FPS = 24
-    ENABLE_CPU_OFFLOAD = True
+    DEFAULT_OFFLOAD_MODE = "model"
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.ltx2 import LTX2Pipeline
@@ -603,7 +624,8 @@ class RCWan22T2V14B(_RCAitkBase):
     MODEL_ID = "wan22_14b_t2v"
     DISPLAY_NAME = "RC Wan 2.2 T2V 14B"
     IS_VIDEO = True
-    ENABLE_CPU_OFFLOAD = True
+    DEFAULT_OFFLOAD_MODE = "model"
+    RESOLUTION_STEP = 32
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -648,6 +670,7 @@ class RCWan22TI2V5B(_RCAitkBase):
     MODEL_ID = "wan22_5b"
     DISPLAY_NAME = "RC Wan 2.2 TI2V 5B"
     IS_VIDEO = True
+    RESOLUTION_STEP = 32
 
     def _pipeline_ctor(self):
         from src.pipelines.wan22_5b import Wan22TI2V5BPipeline

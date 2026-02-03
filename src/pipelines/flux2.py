@@ -21,6 +21,22 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+# Environment variable to enable aggressive memory cleanup (default: off for faster iterative runs)
+AITK_AGGRESSIVE_CLEANUP = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
+# Opt-in: keep a full CPU snapshot of transformer weights for fast LoRA switching.
+# Default off to avoid duplicating RAM.
+AITK_FLUX2_HOTSWAP = os.environ.get("AITK_FLUX2_HOTSWAP", "").lower() in ("1", "true", "yes")
+
+
+def _maybe_cleanup() -> None:
+    """Optionally run aggressive cleanup (gc + CUDA cache clear)."""
+    if not AITK_AGGRESSIVE_CLEANUP:
+        return
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # Scheduler config from ai-toolkit
 FLUX2_SCHEDULER_CONFIG = {
     "base_image_seq_len": 256,
@@ -128,9 +144,7 @@ class Flux2Pipeline(BasePipeline):
                 )
 
             # Clear GPU memory before loading
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _maybe_cleanup()
 
             base_model_path = self.CONFIG.base_model
 
@@ -155,13 +169,20 @@ class Flux2Pipeline(BasePipeline):
             self.timings["load_transformer"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_transformer: {self.timings['load_transformer']:.3f}s")
 
-            # *** HOTSWAP ADDITION: Save original weights before LoRA merge ***
-            t_start = time.perf_counter()
-            logger.info("Saving original transformer weights for LoRA switching")
-            self._original_transformer_state = {k: v.clone() for k, v in transformer.state_dict().items()}
-            self.timings["save_original_weights"] = time.perf_counter() - t_start
-            logger.info(f"Saved {len(self._original_transformer_state)} original weight tensors")
-            logger.info(f"[TIMING] save_original_weights: {self.timings['save_original_weights']:.3f}s")
+            # Optional: Save original weights before LoRA merge (RAM-heavy).
+            if AITK_FLUX2_HOTSWAP:
+                t_start = time.perf_counter()
+                logger.info("Saving original transformer weights for LoRA switching (AITK_FLUX2_HOTSWAP=1)")
+                self._original_transformer_state = {k: v.clone() for k, v in transformer.state_dict().items()}
+                self.timings["save_original_weights"] = time.perf_counter() - t_start
+                logger.info(f"Saved {len(self._original_transformer_state)} original weight tensors")
+                logger.info(f"[TIMING] save_original_weights: {self.timings['save_original_weights']:.3f}s")
+            else:
+                self._original_transformer_state = None
+                logger.info(
+                    "Skipping original transformer weight snapshot (AITK_FLUX2_HOTSWAP not enabled); "
+                    "LoRA switching will require full reload."
+                )
 
             # 2. Load and merge LoRA before moving to GPU
             t_start = time.perf_counter()
@@ -185,9 +206,7 @@ class Flux2Pipeline(BasePipeline):
             logger.info(f"[TIMING] transformer_to_gpu: {self.timings['transformer_to_gpu']:.3f}s")
 
             # Clear memory after transformer load
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _maybe_cleanup()
 
             # 3. Load VAE
             t_start = time.perf_counter()
@@ -213,9 +232,7 @@ class Flux2Pipeline(BasePipeline):
             logger.info(f"[TIMING] load_vae: {self.timings['load_vae']:.3f}s")
 
             # Clear memory after VAE load
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _maybe_cleanup()
 
             # 4. Load Text Encoder
             t_start = time.perf_counter()
@@ -293,9 +310,7 @@ class Flux2Pipeline(BasePipeline):
             self.text_encoder = text_encoder
             self.tokenizer = tokenizer
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _maybe_cleanup()
 
             logger.info("FLUX.2 pipeline loaded successfully")
 
@@ -399,6 +414,7 @@ class Flux2Pipeline(BasePipeline):
                         original_weight.addmm_(lora_b, lora_a, beta=1.0, alpha=scale)
                         merged_count += 1
 
+
         transformer.load_state_dict(transformer_state, assign=True)
         logger.info(f"Merged {merged_count} LoRA layers with scale={lora_scale}")
 
@@ -415,9 +431,7 @@ class Flux2Pipeline(BasePipeline):
                 # copy_() handles cross-device transfer internally without extra allocation
                 state_dict[key].copy_(self._original_transformer_state[key])
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        _maybe_cleanup()
 
     def _load_lora(self, lora_paths: list, lora_scale: float = 1.0):
         """LoRA is already merged in _load_pipeline for FLUX.2."""

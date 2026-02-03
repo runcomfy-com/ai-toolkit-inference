@@ -284,12 +284,22 @@ class PipelineManager:
     def __init__(
         self,
         device: str = "cuda",
-        enable_cpu_offload: bool = True,
+        offload_mode: str = "model",
         lora_download_cache_dir: str = "/tmp/lora_cache",
+        # Deprecated: use offload_mode instead. Kept for backwards compatibility.
+        enable_cpu_offload: Optional[bool] = None,
     ):
         self.device = device
-        self.enable_cpu_offload = enable_cpu_offload
         self.lora_download_cache_dir = lora_download_cache_dir
+
+        # Handle backwards compatibility: enable_cpu_offload overrides offload_mode
+        if enable_cpu_offload is not None:
+            self.offload_mode = "model" if enable_cpu_offload else "none"
+        else:
+            self.offload_mode = offload_mode
+
+        # Legacy property for backwards compatibility
+        self.enable_cpu_offload = self.offload_mode in ("model", "sequential")
 
         # Pipeline cache
         self._cached_pipeline: Optional[Any] = None
@@ -461,13 +471,16 @@ class PipelineManager:
             self._cached_lora_paths = []
             self._cached_lora_scale = 1.0
 
-            # Force garbage collection
+            # Optional extra cleanup (BasePipeline.unload already does gc/empty_cache).
             import gc
             import torch
+            import os
 
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            aggressive = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
+            if aggressive:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
     def unload_pipeline(self, pipeline: Any = None):
         """
@@ -808,7 +821,7 @@ class PipelineManager:
         start_time = time.perf_counter()
         pipeline_instance = pipeline_class(
             device=self.device,
-            enable_cpu_offload=self.enable_cpu_offload,
+            offload_mode=self.offload_mode,
             hf_token=hf_token,
         )
         if timings is not None:

@@ -4,19 +4,56 @@ Base pipeline class with configuration.
 
 import os
 import gc
+import inspect
 import logging
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Any, Optional, List
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional
 
 import torch
 from PIL import Image
-from diffusers.utils.peft_utils import set_weights_and_activate_adapters
 
 from ..schemas.models import ModelType
 
+# Lazy imports - diffusers is only imported when actually needed
+# This avoids loading all diffusers pipelines at startup
+
 logger = logging.getLogger(__name__)
+
+
+# CPU offload mode: exactly one strategy is applied during pipeline load.
+# - "none": No offload, model stays on GPU (fastest inference, highest VRAM)
+# - "model": Model CPU offload - moves full model between CPU/GPU (balanced)
+# - "sequential": Sequential CPU offload - moves layers one at a time (lowest VRAM, slowest)
+OffloadMode = Literal["none", "model", "sequential"]
+
+# Progress/interrupt observer hook for integrations (e.g. ComfyUI).
+#
+# Design goal:
+# - Keep pipelines framework-agnostic: the pipeline code never imports ComfyUI.
+# - External callers (ComfyUI nodes, server, etc.) may install an observer for the
+#   duration of a generate() call to receive per-step notifications and/or raise
+#   an exception to interrupt generation.
+#
+# Observer signature: (step_index, total_steps, timestep) -> None
+PipelineStepObserver = Callable[[int, int, Any], None]
+_PIPELINE_STEP_OBSERVER: ContextVar[Optional[PipelineStepObserver]] = ContextVar(
+    "aitk_pipeline_step_observer",
+    default=None,
+)
+
+
+@contextmanager
+def pipeline_step_observer(observer: Optional[PipelineStepObserver]) -> Iterator[None]:
+    """Temporarily install a per-step observer for diffusers callbacks."""
+    token = _PIPELINE_STEP_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _PIPELINE_STEP_OBSERVER.reset(token)
 
 
 class LoraMergeMethod(Enum):
@@ -99,23 +136,81 @@ class BasePipeline(ABC):
     def __init__(
         self,
         device: str = "cuda",
-        enable_cpu_offload: bool = True,
+        offload_mode: OffloadMode = "model",
         hf_token: Optional[str] = None,
     ):
         if self.CONFIG is None:
             raise NotImplementedError(f"{self.__class__.__name__} must define CONFIG class attribute")
 
         self.device = device
-        self.enable_cpu_offload = enable_cpu_offload
         self.hf_token = hf_token
+        self.offload_mode: OffloadMode = offload_mode
+
         self.pipe = None
         self.lora_loaded = False
-        self.dtype = torch.bfloat16
+        self.dtype = self._default_dtype_for_device(device)
         self.timings: Dict[str, float] = {}
         self._current_lora_scale: float = 1.0
         self._current_lora_paths: List[str] = []  # Track currently loaded LoRA paths
         self._lora_fused: bool = False  # Track if LoRA is fused into model weights
         self._num_loras_fused: int = 0  # Track number of LoRAs fused (for unfuse reliability check)
+
+    @staticmethod
+    def _default_dtype_for_device(device: str) -> torch.dtype:
+        """Pick a safe default dtype based on hardware capabilities.
+
+        Rules:
+        - CPU: float32
+        - CUDA: bf16 if supported, else float16
+        - Other/unknown: float32
+        """
+        dev = (device or "").lower()
+        if dev.startswith("cpu") or dev == "cpu":
+            return torch.float32
+
+        if dev.startswith("cuda") and torch.cuda.is_available():
+            try:
+                if torch.cuda.is_bf16_supported():
+                    return torch.bfloat16
+            except Exception:
+                # Older torch builds may not expose is_bf16_supported(); fall back to fp16.
+                pass
+            return torch.float16
+
+        return torch.float32
+
+    def _get_execution_device(self) -> torch.device:
+        """Best-effort device selection for input tensors.
+
+        Prefer diffusers' `_execution_device` (used for CPU offload modes), fall back
+        to pipeline `.device`, then finally to this wrapper's configured device.
+        """
+        pipe_obj = getattr(self, "pipe", None)
+        if pipe_obj is not None:
+            # diffusers (and many wrappers) expose this for correct input placement under offload
+            try:
+                exec_dev = getattr(pipe_obj, "_execution_device", None)
+                if exec_dev is not None:
+                    return exec_dev if isinstance(exec_dev, torch.device) else torch.device(exec_dev)
+            except Exception:
+                pass
+
+            # fallback: some pipelines expose `.device`
+            try:
+                dev = getattr(pipe_obj, "device", None)
+                if dev is not None:
+                    return dev if isinstance(dev, torch.device) else torch.device(dev)
+            except Exception:
+                pass
+
+        # wrapper-level fallback
+        dev_s = (getattr(self, "device", None) or "cpu")
+        dev_s = str(dev_s)
+        if dev_s.startswith("cuda") and torch.cuda.is_available():
+            return torch.device(dev_s)
+        if dev_s.startswith("mps") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
 
     @classmethod
     def get_config(cls) -> PipelineConfig:
@@ -133,18 +228,190 @@ class BasePipeline(ABC):
         # This provides ~20% speedup for Transformer-based models (Wan, FLUX, etc.)
         self._enable_xformers()
 
-        # Move to device or enable CPU offload
-        if self.enable_cpu_offload and hasattr(self.pipe, "enable_model_cpu_offload"):
-            logger.info("Enabling CPU offload")
-            self.pipe.enable_model_cpu_offload()
-        else:
-            self.pipe.to(self.device)
+        # Apply exactly ONE offload strategy based on offload_mode.
+        # This is the single place where device placement is configured.
+        self._apply_offload_mode()
 
         # Load LoRA weights
         if lora_paths:
             self._load_lora(lora_paths, lora_scale)
         else:
             logger.warning("No LoRA paths provided")
+
+    def _apply_offload_mode(self):
+        """Apply the configured offload mode to the pipeline.
+        
+        This method applies exactly ONE offload strategy:
+        - "sequential": Sequential CPU offload (lowest VRAM, slowest)
+        - "model": Model CPU offload (balanced)
+        - "none": No offload, model on GPU (fastest, highest VRAM)
+        
+        Subclasses can override this if they need custom offload behavior.
+        """
+        if self.pipe is None:
+            return
+
+        if self.offload_mode == "sequential":
+            self._enable_sequential_cpu_offload()
+        elif self.offload_mode == "model":
+            if hasattr(self.pipe, "enable_model_cpu_offload"):
+                logger.info("Enabling model CPU offload")
+                self.pipe.enable_model_cpu_offload()
+            else:
+                logger.warning("Model CPU offload not available, moving to device")
+                self.pipe.to(self.device)
+        else:  # "none"
+            logger.info(f"Moving pipeline to {self.device} (no offload)")
+            self.pipe.to(self.device)
+
+    def _enable_sequential_cpu_offload(self):
+        """Enable sequential CPU offload for lowest VRAM usage.
+        
+        Sequential offload moves layers one at a time between CPU and GPU,
+        which uses minimal VRAM but is slower than model offload.
+        
+        Subclasses can override this to add additional state tracking
+        (e.g., QwenImagePipeline sets _using_sequential_offload).
+        """
+        if self.pipe is None:
+            return
+
+        if hasattr(self.pipe, "enable_sequential_cpu_offload"):
+            logger.info("Enabling sequential CPU offload (low VRAM mode)")
+            self.pipe.enable_sequential_cpu_offload()
+        else:
+            logger.warning("Sequential CPU offload not available, falling back to model offload")
+            if hasattr(self.pipe, "enable_model_cpu_offload"):
+                self.pipe.enable_model_cpu_offload()
+            else:
+                self.pipe.to(self.device)
+
+    def _inject_diffusers_callback_kwargs(
+        self,
+        call_kwargs: Dict[str, Any],
+        *,
+        total_steps: int,
+        pipe: Optional[Any] = None,
+    ) -> None:
+        """Inject step callbacks into a diffusers pipeline call.
+
+        This is intentionally integration-agnostic: it only consults the current
+        observer installed via `pipeline_step_observer(...)`. If no observer is
+        installed, this is a no-op.
+
+        Preference order:
+        - diffusers `callback_on_step_end` (newer API)
+        - diffusers `callback` + `callback_steps` (legacy API)
+
+        Args:
+            call_kwargs: kwargs dict that will be passed to the pipeline call (mutated in-place).
+            total_steps: total number of inference steps for progress reporting.
+            pipe: optional pipeline object to inspect; defaults to `self.pipe`.
+        """
+        observer = _PIPELINE_STEP_OBSERVER.get()
+        if observer is None:
+            return
+
+        pipe_obj = pipe if pipe is not None else self.pipe
+        if pipe_obj is None:
+            return
+
+        pipe_call = getattr(pipe_obj, "__call__", None)
+        if pipe_call is None:
+            return
+
+        try:
+            sig = inspect.signature(pipe_call)
+        except (TypeError, ValueError):
+            return
+
+        params = sig.parameters
+
+        def _notify(step, timestep):
+            try:
+                step_i = int(step) if step is not None else 0
+            except Exception:
+                step_i = 0
+            try:
+                total_i = int(total_steps)
+            except Exception:
+                total_i = total_steps  # type: ignore[assignment]
+            # Let observer raise to interrupt generation.
+            observer(step_i, total_i, timestep)
+
+        # Newer diffusers API: callback_on_step_end
+        if "callback_on_step_end" in params:
+            existing_cb = call_kwargs.get("callback_on_step_end", None)
+
+            def callback_on_step_end(*args, **kwargs):
+                # Typical signatures:
+                # - (pipe, step, timestep, callback_kwargs)
+                # - (step, timestep, callback_kwargs)
+                step = kwargs.get("step", None)
+                timestep = kwargs.get("timestep", None)
+                cb_kwargs = None
+
+                # Run any existing callback first (e.g., internal hooks), preserving its return value.
+                if callable(existing_cb):
+                    try:
+                        cb_kwargs = existing_cb(*args, **kwargs)
+                    except Exception:
+                        # Let exceptions propagate (interrupts must stop generation).
+                        raise
+
+                # Fallback to diffusers-provided callback_kwargs if the existing callback didn't return one.
+                if cb_kwargs is None:
+                    cb_kwargs = kwargs.get("callback_kwargs", None)
+
+                if step is None:
+                    if len(args) >= 2 and isinstance(args[1], int):
+                        step = args[1]
+                        if timestep is None and len(args) >= 3:
+                            timestep = args[2]
+                    elif len(args) >= 1 and isinstance(args[0], int):
+                        step = args[0]
+                        if timestep is None and len(args) >= 2:
+                            timestep = args[1]
+                    else:
+                        step = 0
+
+                # diffusers typically passes callback_kwargs as the last positional arg
+                if cb_kwargs is None and args and isinstance(args[-1], dict):
+                    cb_kwargs = args[-1]
+                if cb_kwargs is None:
+                    cb_kwargs = {}
+
+                _notify(step, timestep)
+                return cb_kwargs
+
+            call_kwargs["callback_on_step_end"] = callback_on_step_end
+            if "callback_on_step_end_tensor_inputs" in params and "callback_on_step_end_tensor_inputs" not in call_kwargs:
+                # We only need step/timestep for progress + interrupt, so no tensors required.
+                call_kwargs["callback_on_step_end_tensor_inputs"] = []
+            return
+
+        # Legacy diffusers API: callback (+ callback_steps)
+        if "callback" in params:
+            existing_cb = call_kwargs.get("callback", None)
+
+            def callback(*args, **kwargs):
+                # Typical signature: (step, timestep, latents)
+                if callable(existing_cb):
+                    try:
+                        existing_cb(*args, **kwargs)
+                    except Exception:
+                        raise
+                step = kwargs.get("step", None)
+                timestep = kwargs.get("timestep", None)
+                if step is None:
+                    step = args[0] if len(args) >= 1 else 0
+                if timestep is None:
+                    timestep = args[1] if len(args) >= 2 else None
+                _notify(step, timestep)
+
+            call_kwargs["callback"] = callback
+            if "callback_steps" in params and "callback_steps" not in call_kwargs:
+                call_kwargs["callback_steps"] = 1
 
     @abstractmethod
     def _load_pipeline(self):
@@ -252,6 +519,9 @@ class BasePipeline(ABC):
         Args:
             scale: LoRA scale value
         """
+        # Lazy import to avoid loading all diffusers pipelines at startup
+        from diffusers.utils.peft_utils import set_weights_and_activate_adapters
+
         # Get all components that may have LoRA adapters
         for component_name in ["transformer", "unet", "text_encoder", "text_encoder_2"]:
             component = getattr(self.pipe, component_name, None)
@@ -449,6 +719,9 @@ class BasePipeline(ABC):
         control_images: Optional[List[Image.Image]] = None,
         num_frames: Optional[int] = None,
         fps: Optional[int] = None,
+        output_type: str = "pil",
+        latents: Optional[torch.Tensor] = None,
+        denoise_strength: float = 1.0,
     ) -> Dict[str, Any]:
         """
         Generate image/video.
@@ -465,9 +738,12 @@ class BasePipeline(ABC):
             control_images: Multiple control images (for qwen_image_edit_plus etc.)
             num_frames: Number of frames for video
             fps: Frames per second for video
+            output_type: "pil" for PIL Image, "latent" for raw latent tensor
+            latents: Optional input latents for img2img/refine workflows
+            denoise_strength: Denoising strength (0-1) when using input latents
 
         Returns:
-            Dict with "image" or "frames" key, plus "seed".
+            Dict with "image" or "frames" or "latents" key, plus "seed".
         """
         # Apply defaults from config
         if num_inference_steps is None:
@@ -479,40 +755,65 @@ class BasePipeline(ABC):
         if fps is None:
             fps = self.CONFIG.default_fps
 
-        # # Validate dimensions
-        # divisor = self.CONFIG.resolution_divisor
-        # width = (width // divisor) * divisor
-        # height = (height // divisor) * divisor
+        # Validate and snap dimensions to resolution_divisor (floor + warn)
+        divisor = self.CONFIG.resolution_divisor
+        snapped_width = (width // divisor) * divisor
+        snapped_height = (height // divisor) * divisor
+        if snapped_width != width or snapped_height != height:
+            logger.warning(
+                f"Resolution {width}x{height} not divisible by {divisor}; "
+                f"snapping to {snapped_width}x{snapped_height}"
+            )
+            width = snapped_width
+            height = snapped_height
 
         # Handle seed
         if seed < 0:
             seed = torch.randint(0, 2147483647, (1,)).item()
 
-        # Set global seeds (aligned with ai-toolkit's base_model.py and train_tools.py)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-
-        # Create generator (CPU generator for ai-toolkit compatibility)
-        generator = torch.manual_seed(seed)
+        # Stop global RNG side-effects: use a local generator (CPU generator for ai-toolkit compatibility)
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
 
         logger.info(f"Generating: prompt='{prompt[:50]}...', size={width}x{height}, seed={seed}")
 
-        # Run inference
+        # Run inference - try with output_type/latents support, fall back to basic call
         with torch.inference_mode():
-            result = self._run_inference(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                control_image=control_image,
-                control_images=control_images,
-                num_frames=num_frames,
-                fps=fps,
-            )
+            try:
+                result = self._run_inference(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or "",
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    control_image=control_image,
+                    control_images=control_images,
+                    num_frames=num_frames,
+                    fps=fps,
+                    output_type=output_type,
+                    latents=latents,
+                    denoise_strength=denoise_strength,
+                )
+            except TypeError:
+                # Fallback for pipelines that don't support output_type/latents yet
+                if output_type != "pil" or latents is not None:
+                    raise NotImplementedError(
+                        f"{self.__class__.__name__} does not support output_type='{output_type}' or latents input yet"
+                    )
+                result = self._run_inference(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt or "",
+                    width=width,
+                    height=height,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                    control_image=control_image,
+                    control_images=control_images,
+                    num_frames=num_frames,
+                    fps=fps,
+                )
 
         # Add seed to result
         result["seed"] = seed

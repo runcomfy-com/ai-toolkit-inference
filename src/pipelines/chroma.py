@@ -202,8 +202,8 @@ class ChromaPipeline(BasePipeline):
             class FakeCLIP(torch.nn.Module):
                 def __init__(self):
                     super().__init__()
-                    self.dtype = torch.bfloat16
-                    self.device = "cuda"
+                    self.dtype = None
+                    self.device = None
                     self.text_model = None
                     self.tokenizer = None
                     self.model_max_length = 77
@@ -213,6 +213,11 @@ class ChromaPipeline(BasePipeline):
 
             text_encoder = FakeCLIP()
             tokenizer = FakeCLIP()
+            # Align placeholder device/dtype with the wrapper's configuration.
+            text_encoder.dtype = self.dtype
+            tokenizer.dtype = self.dtype
+            text_encoder.device = self.device
+            tokenizer.device = self.device
             text_encoder.to(self.device, dtype=self.dtype)
 
             # ========== Step 5: Create scheduler ==========
@@ -401,18 +406,22 @@ class ChromaPipeline(BasePipeline):
         # Aligned with chroma_inference.py: use torch.no_grad() + autocast
         # Note: base.py already wraps with torch.inference_mode(), but we keep
         # torch.no_grad() for consistency with the script
+        call_kwargs = {
+            "prompt_embeds": conditional_embeds.text_embeds,
+            "prompt_attn_mask": conditional_embeds.attention_mask,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "latents": None,  # Aligned with script (default None)
+            "generator": generator,
+            **extra,
+        }
+        # Comfy-native progress + interrupt (no-op unless an observer is installed).
+        self._inject_diffusers_callback_kwargs(call_kwargs, total_steps=num_inference_steps)
+
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            result = self.pipe(
-                prompt_embeds=conditional_embeds.text_embeds,
-                prompt_attn_mask=conditional_embeds.attention_mask,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                latents=None,  # Aligned with script (default None)
-                generator=generator,
-                **extra,
-            )
+            result = self.pipe(**call_kwargs)
 
         return {"image": result.images[0]}
 

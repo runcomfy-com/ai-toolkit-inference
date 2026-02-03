@@ -24,7 +24,7 @@ def test_flux2_pipeline_always_passes_non_none_negative_prompt():
             assert kwargs["negative_prompt"] is not None
             return _DummyResult()
 
-    p = Flux2Pipeline(device="cpu", enable_cpu_offload=False, hf_token=None)
+    p = Flux2Pipeline(device="cpu", offload_mode="none", hf_token=None)
     p.pipe = _DummyPipe()
 
     out = p._run_inference(

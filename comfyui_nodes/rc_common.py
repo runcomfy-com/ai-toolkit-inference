@@ -12,13 +12,16 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# CPU offload mode type (matches src/pipelines/base.py OffloadMode)
+OffloadMode = Literal["none", "model", "sequential"]
 
 
 def comfy_to_pil_image(tensor: torch.Tensor) -> Image.Image:
@@ -130,9 +133,18 @@ def _maybe_download_lora_paths(lora_paths: List[Union[str, Dict[str, str]]]) -> 
 @dataclass(frozen=True)
 class PipelineCacheKey:
     model_id: str
+    pipeline_id: str  # e.g. "module:ClassName" to distinguish different pipeline classes
+    offload_mode: OffloadMode  # CPU offload strategy (none/model/sequential)
     hf_token: Optional[str]
     lora_paths_key: Tuple
     lora_scale_key: Union[float, Tuple[Tuple[str, float], ...]]
+
+
+def _get_pipeline_id(pipeline_ctor) -> str:
+    """Get a unique identifier for a pipeline class/constructor."""
+    if hasattr(pipeline_ctor, "__module__") and hasattr(pipeline_ctor, "__name__"):
+        return f"{pipeline_ctor.__module__}:{pipeline_ctor.__name__}"
+    return str(pipeline_ctor)
 
 
 _PIPELINE_CACHE: Dict[str, Any] = {
@@ -145,21 +157,32 @@ def get_or_load_pipeline(
     *,
     model_id: str,
     pipeline_ctor,
-    enable_cpu_offload: bool,
+    offload_mode: OffloadMode = "model",
     hf_token: Optional[str],
     lora_paths: List[Union[str, Dict[str, str]]],
     lora_scale: Union[float, Dict[str, float]],
 ) -> Any:
     """Load and cache a single pipeline instance.
 
-    If model/token/lora config changes, unload old pipeline and load new.
+    If model/token/lora/pipeline_class/offload_mode changes, unload old pipeline and load new.
+
+    Args:
+        model_id: Model identifier for cache key
+        pipeline_ctor: Pipeline class constructor
+        offload_mode: CPU offload strategy ("none", "model", "sequential")
+        hf_token: HuggingFace token for gated models
+        lora_paths: List of LoRA paths to load
+        lora_scale: LoRA strength (0.0 to 2.0)
     """
     global _PIPELINE_CACHE
 
     resolved_loras = _maybe_download_lora_paths(lora_paths)
     scale_value = _normalize_lora_scale_value(lora_scale)
+    pipeline_id = _get_pipeline_id(pipeline_ctor)
     key = PipelineCacheKey(
         model_id=model_id,
+        pipeline_id=pipeline_id,
+        offload_mode=offload_mode,
         hf_token=hf_token or None,
         lora_paths_key=_normalize_lora_paths_for_cache(resolved_loras),
         lora_scale_key=_normalize_lora_scale_for_cache(scale_value),
@@ -176,8 +199,8 @@ def get_or_load_pipeline(
         _PIPELINE_CACHE["instance"] = None
         _PIPELINE_CACHE["key"] = None
 
-    logger.info(f"Loading pipeline model_id={model_id} loras={resolved_loras} scale={scale_value}")
-    pipe = pipeline_ctor(device="cuda", enable_cpu_offload=enable_cpu_offload, hf_token=hf_token or None)
+    logger.info(f"Loading pipeline model_id={model_id} offload_mode={offload_mode} loras={resolved_loras} scale={scale_value}")
+    pipe = pipeline_ctor(device="cuda", offload_mode=offload_mode, hf_token=hf_token or None)
     pipe.load(lora_paths=resolved_loras, lora_scale=scale_value)
 
     _PIPELINE_CACHE["instance"] = pipe
