@@ -15,6 +15,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 
 from .base import BasePipeline, PipelineConfig, LoraMergeMethod
+from .latent_mixins import QwenLatentMixin
 from ..schemas.models import ModelType
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ def _get_condition_image_size():
 
 
 
-class QwenImagePipeline(BasePipeline):
+class QwenImagePipeline(QwenLatentMixin, BasePipeline):
     """Qwen Image (DiT / flow-matching) pipeline wrapper.
 
     Key detail for latent workflows:
