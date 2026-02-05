@@ -12,11 +12,14 @@ from urllib.parse import urlparse
 
 import requests
 
-from ..pipelines import get_pipeline_class, get_pipeline_config, PIPELINE_REGISTRY
+from ..pipelines import get_pipeline_class, get_pipeline_config
 from ..libs.url_utils import normalize_huggingface_file_url, looks_like_html_file
+from ..schemas.models import ModelType
 from .download_config import ExtraDownload, get_download_config
 
 logger = logging.getLogger(__name__)
+
+_FILTERED_REPO_IDS: Optional[set[str]] = None
 
 
 def _build_filtered_repo_ids() -> set[str]:
@@ -27,17 +30,28 @@ def _build_filtered_repo_ids() -> set[str]:
     to ensure missing files are fetched when needed.
     """
     repo_ids: set[str] = set()
-    for model_type, pipeline_cls in PIPELINE_REGISTRY.items():
+    for model_type in ModelType:
+        try:
+            pipeline_config = get_pipeline_config(model_type.value)
+        except Exception as e:
+            logger.debug("Skipping model type %s while building filtered repo ids: %s", model_type.value, e)
+            continue
+        if not pipeline_config:
+            continue
         config = get_download_config(model_type)
         if config.allow_patterns or config.ignore_patterns:
-            repo_ids.add(pipeline_cls.CONFIG.base_model)
+            repo_ids.add(pipeline_config.base_model)
         for extra in config.extras:
             if extra.allow_patterns or extra.ignore_patterns:
                 repo_ids.add(extra.repo_id)
     return repo_ids
 
 
-FILTERED_REPO_IDS = _build_filtered_repo_ids()
+def _get_filtered_repo_ids() -> set[str]:
+    global _FILTERED_REPO_IDS
+    if _FILTERED_REPO_IDS is None:
+        _FILTERED_REPO_IDS = _build_filtered_repo_ids()
+    return _FILTERED_REPO_IDS
 
 
 def is_url(path: str) -> bool:
@@ -539,7 +553,8 @@ class PipelineManager:
         ignore_patterns = ignore_patterns or None
 
         # More robust cache check using scan_cache_dir
-        use_cache_check = allow_patterns is None and ignore_patterns is None and repo_id not in FILTERED_REPO_IDS
+        filtered_repo_ids = _get_filtered_repo_ids()
+        use_cache_check = allow_patterns is None and ignore_patterns is None and repo_id not in filtered_repo_ids
         if use_cache_check:
             try:
                 cache_info = scan_cache_dir()
