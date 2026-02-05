@@ -104,6 +104,52 @@ _LAZY_IMPORTS = {
 # Cache for lazily loaded classes
 _LAZY_CACHE = {}
 
+_MODEL_TYPE_TO_CLASS = {
+    # FLUX family
+    ModelType.FLUX: "FluxDevPipeline",
+    ModelType.FLUX_KONTEXT: "FluxKontextPipeline",
+    ModelType.FLUX2: "Flux2Pipeline",
+    ModelType.FLUX2_DIFFUSERS: "Flux2DiffusersPipeline",
+    ModelType.FLUX2_KLEIN_4B: "Flux2Klein4BPipeline",
+    ModelType.FLUX2_KLEIN_9B: "Flux2Klein9BPipeline",
+    # Flex family
+    ModelType.FLEX1: "Flex1AlphaPipeline",
+    ModelType.FLEX2: "Flex2Pipeline",
+    # Stable Diffusion family
+    ModelType.SD15: "SD15Pipeline",
+    ModelType.SDXL: "SDXLPipeline",
+    # Qwen family
+    ModelType.QWEN_IMAGE: "QwenImagePipeline",
+    ModelType.QWEN_IMAGE_2512: "QwenImage2512Pipeline",
+    ModelType.QWEN_IMAGE_EDIT: "QwenImageEditPipeline",
+    ModelType.QWEN_IMAGE_EDIT_PLUS_2509: "QwenImageEditPlus2509Pipeline",
+    ModelType.QWEN_IMAGE_EDIT_PLUS_2511: "QwenImageEditPlus2511Pipeline",
+    # Z-Image family
+    ModelType.ZIMAGE: "ZImagePipeline",
+    ModelType.ZIMAGE_TURBO: "ZImageTurboPipeline",
+    ModelType.ZIMAGE_DETURBO: "ZImageDeturboPipeline",
+    # Wan 2.1 family
+    ModelType.WAN21_14B: "Wan21T2V14BPipeline",
+    ModelType.WAN21_1B: "Wan21T2V1BPipeline",
+    ModelType.WAN21_I2V_14B: "Wan21I2V14BPipeline",
+    ModelType.WAN21_I2V_14B_480P: "Wan21I2V14B480PPipeline",
+    # Wan 2.2 family
+    ModelType.WAN22_14B_T2V: "Wan22T2V14BPipeline",
+    ModelType.WAN22_14B_I2V: "Wan22I2V14BPipeline",
+    ModelType.WAN22_5B: "Wan22TI2V5BPipeline",
+    # Chroma
+    ModelType.CHROMA: "ChromaPipeline",
+    # HiDream
+    ModelType.HIDREAM: "HiDreamPipeline",
+    ModelType.HIDREAM_E1: "HiDreamE1Pipeline",
+    # Lumina
+    ModelType.LUMINA2: "Lumina2Pipeline",
+    # OmniGen
+    ModelType.OMNIGEN2: "OmniGen2Pipeline",
+    # LTX-2
+    ModelType.LTX2: "LTX2Pipeline",
+}
+
 
 def __getattr__(name: str):
     """Lazy import handler - only loads pipeline classes when accessed."""
@@ -130,61 +176,19 @@ def __getattr__(name: str):
 def _build_pipeline_registry() -> dict:
     """Build the pipeline registry lazily."""
     # Import classes lazily as needed
-    return {
-        # FLUX family
-        ModelType.FLUX: __getattr__("FluxDevPipeline"),
-        ModelType.FLUX_KONTEXT: __getattr__("FluxKontextPipeline"),
-        ModelType.FLUX2: __getattr__("Flux2Pipeline"),
-        ModelType.FLUX2_DIFFUSERS: __getattr__("Flux2DiffusersPipeline"),
-        ModelType.FLUX2_KLEIN_4B: __getattr__("Flux2Klein4BPipeline"),
-        ModelType.FLUX2_KLEIN_9B: __getattr__("Flux2Klein9BPipeline"),
-        # Flex family
-        ModelType.FLEX1: __getattr__("Flex1AlphaPipeline"),
-        ModelType.FLEX2: __getattr__("Flex2Pipeline"),
-        # Stable Diffusion family
-        ModelType.SD15: __getattr__("SD15Pipeline"),
-        ModelType.SDXL: __getattr__("SDXLPipeline"),
-        # Qwen family
-        ModelType.QWEN_IMAGE: __getattr__("QwenImagePipeline"),
-        ModelType.QWEN_IMAGE_2512: __getattr__("QwenImage2512Pipeline"),
-        ModelType.QWEN_IMAGE_EDIT: __getattr__("QwenImageEditPipeline"),
-        ModelType.QWEN_IMAGE_EDIT_PLUS_2509: __getattr__("QwenImageEditPlus2509Pipeline"),
-        ModelType.QWEN_IMAGE_EDIT_PLUS_2511: __getattr__("QwenImageEditPlus2511Pipeline"),
-        # Z-Image family
-        ModelType.ZIMAGE: __getattr__("ZImagePipeline"),
-        ModelType.ZIMAGE_TURBO: __getattr__("ZImageTurboPipeline"),
-        ModelType.ZIMAGE_DETURBO: __getattr__("ZImageDeturboPipeline"),
-        # Wan 2.1 family
-        ModelType.WAN21_14B: __getattr__("Wan21T2V14BPipeline"),
-        ModelType.WAN21_1B: __getattr__("Wan21T2V1BPipeline"),
-        ModelType.WAN21_I2V_14B: __getattr__("Wan21I2V14BPipeline"),
-        ModelType.WAN21_I2V_14B_480P: __getattr__("Wan21I2V14B480PPipeline"),
-        # Wan 2.2 family
-        ModelType.WAN22_14B_T2V: __getattr__("Wan22T2V14BPipeline"),
-        ModelType.WAN22_14B_I2V: __getattr__("Wan22I2V14BPipeline"),
-        ModelType.WAN22_5B: __getattr__("Wan22TI2V5BPipeline"),
-        # Chroma
-        ModelType.CHROMA: __getattr__("ChromaPipeline"),
-        # HiDream
-        ModelType.HIDREAM: __getattr__("HiDreamPipeline"),
-        ModelType.HIDREAM_E1: __getattr__("HiDreamE1Pipeline"),
-        # Lumina
-        ModelType.LUMINA2: __getattr__("Lumina2Pipeline"),
-        # OmniGen
-        ModelType.OMNIGEN2: __getattr__("OmniGen2Pipeline"),
-        # LTX-2
-        ModelType.LTX2: __getattr__("LTX2Pipeline"),
-    }
+    return {model_type: __getattr__(class_name) for model_type, class_name in _MODEL_TYPE_TO_CLASS.items()}
 
 
 def get_pipeline_class(model: str) -> Optional[Type[BasePipeline]]:
     """Get pipeline class for a model type string."""
     try:
         model_type = ModelType(model)
-        registry = __getattr__("PIPELINE_REGISTRY")
-        return registry.get(model_type)
     except ValueError:
         return None
+    class_name = _MODEL_TYPE_TO_CLASS.get(model_type)
+    if not class_name:
+        return None
+    return __getattr__(class_name)
 
 
 def get_pipeline_config(model: str) -> Optional[PipelineConfig]:

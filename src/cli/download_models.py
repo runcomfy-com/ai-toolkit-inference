@@ -2,7 +2,8 @@
 CLI for pre-downloading model assets.
 
 Examples:
-  python -m src.cli.download_models --base-model "black-forest-labs/FLUX.2-dev"
+  python -m src.cli.download_models --model-type flux2
+  python -m src.cli.download_models --model-type flux2,sdxl
   python -m src.cli.download_models
 """
 
@@ -15,9 +16,9 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
 from ..config import settings
-from ..pipelines import PIPELINE_REGISTRY
+from ..pipelines import get_pipeline_config
+from ..schemas.models import ModelType
 from ..services.download_config import get_download_config
-from ..services.pipeline_manager import PipelineManager
 
 
 @dataclass
@@ -69,7 +70,16 @@ def _merge_download_tasks(tasks: Iterable[DownloadTask]) -> List[DownloadTask]:
 
 
 def _collect_pipeline_configs() -> list:
-    configs = [pipeline_cls.CONFIG for pipeline_cls in PIPELINE_REGISTRY.values()]
+    logger = logging.getLogger(__name__)
+    configs = []
+    for model_type in ModelType:
+        try:
+            config = get_pipeline_config(model_type.value)
+        except Exception as e:
+            logger.warning("Skipping model type %s due to import error: %s", model_type.value, e)
+            continue
+        if config:
+            configs.append(config)
     configs.sort(key=lambda cfg: cfg.model_type.value)
     return configs
 
@@ -98,12 +108,39 @@ def _build_download_tasks(pipeline_configs: Iterable) -> List[DownloadTask]:
     return _merge_download_tasks(tasks)
 
 
+def _parse_model_types(values: Optional[List[str]]) -> Optional[List[str]]:
+    if not values:
+        return None
+    model_types: List[str] = []
+    for value in values:
+        if not value:
+            continue
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                model_types.append(item)
+    if not model_types:
+        return None
+    return sorted(set(model_types))
+
+
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pre-download model assets.")
     parser.add_argument(
-        "--base-model",
-        dest="base_model",
-        help="Hugging Face repo ID to pre-download. If omitted, downloads all models.",
+        "--model-type",
+        dest="model_types",
+        action="append",
+        help=(
+            "Model type(s) to pre-download, e.g. flux2 or sdxl. "
+            "Repeat the flag or use commas for multiple values. "
+            "If omitted, downloads all models."
+        ),
+    )
+    parser.add_argument(
+        "--list-model-types",
+        dest="list_model_types",
+        action="store_true",
+        help="List supported model types and exit.",
     )
     parser.add_argument(
         "--hf-token",
@@ -120,20 +157,41 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     logger = logging.getLogger(__name__)
 
-    pipeline_configs = _collect_pipeline_configs()
+    if args.list_model_types:
+        available = sorted({model_type.value for model_type in ModelType})
+        logger.info("Supported model types:")
+        for model_type in available:
+            logger.info("  %s", model_type)
+        return 0
 
-    if args.base_model:
-        pipeline_configs = [cfg for cfg in pipeline_configs if cfg.base_model == args.base_model]
-        if not pipeline_configs:
-            available = sorted({cfg.base_model for cfg in _collect_pipeline_configs()})
-            logger.error("Unknown base model: %s", args.base_model)
-            logger.info("Available base models:")
-            for model in available:
-                logger.info("  %s", model)
+    selected_model_types = _parse_model_types(args.model_types)
+    if selected_model_types:
+        available = {model_type.value for model_type in ModelType}
+        unknown = [model for model in selected_model_types if model not in available]
+        if unknown:
+            available_sorted = sorted(available)
+            logger.error("Unknown model type(s): %s", ", ".join(unknown))
+            logger.info("Available model types:")
+            for model_type in available_sorted:
+                logger.info("  %s", model_type)
             return 1
+        pipeline_configs = []
+        for model_type in selected_model_types:
+            try:
+                config = get_pipeline_config(model_type)
+            except Exception as e:
+                logger.error("Failed to load model type %s: %s", model_type, e)
+                logger.info("Install optional dependencies for %s and try again.", model_type)
+                return 1
+            if config:
+                pipeline_configs.append(config)
+    else:
+        pipeline_configs = _collect_pipeline_configs()
 
     tasks = _build_download_tasks(pipeline_configs)
     logger.info("Download tasks: %d", len(tasks))
+
+    from ..services.pipeline_manager import PipelineManager
 
     manager = PipelineManager()
     total_time = 0.0
