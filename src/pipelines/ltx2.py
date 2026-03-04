@@ -271,7 +271,7 @@ class LTX2Pipeline(BasePipeline):
 
         if not lora_paths:
             logger.warning("No LoRA paths provided")
-        return False
+            return False
 
         merge_method = self.CONFIG.lora_merge_method
 
