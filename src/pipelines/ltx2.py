@@ -675,6 +675,12 @@ class LTX23Pipeline(LTX2Pipeline):
             if audio_tensor is not None:
                 audio_tensor = audio_tensor.float().cpu()
 
+        # Release audio models from GPU before stages 2/3 to avoid OOM on offload setups
+        if self.offload_mode != "none":
+            pipe.audio_vae.to("cpu")
+            pipe.vocoder.to("cpu")
+            torch.cuda.empty_cache()
+
         # === Stage 2: 2x latent upsample ===
         t0 = time.perf_counter()
         upsample_pipe = self._get_upsample_pipeline()

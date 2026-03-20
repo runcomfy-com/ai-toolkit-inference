@@ -119,16 +119,10 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
         ]
     ),
     # LTX-2.3
-    ModelType.LTX2_3: DownloadConfig(
-        extras=[
-            ExtraDownload(
-                repo_id="dg845/LTX-2.3-Spatial-Upsampler-Diffusers",
-            ),
-            ExtraDownload(
-                repo_id="CalamitousFelicitousness/LTX-2.3-distilled-lora-384-Diffusers",
-            ),
-        ]
-    ),
+    # Note: Spatial upsampler and distilled LoRA are NOT predownloaded here.
+    # They are lazy-loaded on first High-mode request in LTX23Pipeline to avoid
+    # making them unconditional dependencies for Default-mode requests.
+    ModelType.LTX2_3: DownloadConfig(),
 }
 
 
