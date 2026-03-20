@@ -118,6 +118,8 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
             "text_encoder/diffusion_pytorch_model*",
         ]
     ),
+    # LTX-2.3
+    ModelType.LTX2_3: DownloadConfig(),
 }
 
 

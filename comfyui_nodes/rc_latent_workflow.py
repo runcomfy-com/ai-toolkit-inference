@@ -166,6 +166,7 @@ class RCAITKLoadPipeline:
         "qwen_image_edit_plus_2511",
         # Video models
         "ltx2",
+        "ltx2.3",
         "wan21_14b",
         "wan21_1b",
         "wan21_i2v_14b",
@@ -240,6 +241,7 @@ class RCAITKLoadPipeline:
             "qwen_image_edit_plus": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImageEditPlus2509Pipeline"]).QwenImageEditPlus2509Pipeline,
             "qwen_image_edit_plus_2511": lambda: __import__("src.pipelines.qwen_image", fromlist=["QwenImageEditPlus2511Pipeline"]).QwenImageEditPlus2511Pipeline,
             "ltx2": lambda: __import__("src.pipelines.ltx2", fromlist=["LTX2Pipeline"]).LTX2Pipeline,
+            "ltx2.3": lambda: __import__("src.pipelines.ltx2", fromlist=["LTX23Pipeline"]).LTX23Pipeline,
             "wan21_14b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21T2V14BPipeline"]).Wan21T2V14BPipeline,
             "wan21_1b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21T2V1BPipeline"]).Wan21T2V1BPipeline,
             "wan21_i2v_14b": lambda: __import__("src.pipelines.wan21", fromlist=["Wan21I2V14BPipeline"]).Wan21I2V14BPipeline,

@@ -4,7 +4,7 @@
 
 Reference **Diffusers LoRA inference pipelines** (plus an optional HTTP server) for LoRAs trained with [ostris/ai-toolkit](https://github.com/ostris/ai-toolkit), designed to minimize **AI Toolkit training sample vs inference output drift** so your real inference outputs are consistent with the samples you validated during training, and remain reproducible across environments.
 
-Supports **27+ models** across image generation, editing, and video: FLUX.1/FLUX.2 (including FLUX.2-klein), Flex, SD/SDXL, Qwen Image (and Edit variants), Z-Image, Wan 2.1/2.2, LTX-2, Chroma, HiDream, Lumina2, OmniGen2, and more.
+Supports **28+ models** across image generation, editing, and video: FLUX.1/FLUX.2 (including FLUX.2-klein), Flex, SD/SDXL, Qwen Image (and Edit variants), Z-Image, Wan 2.1/2.2, LTX-2/2.3, Chroma, HiDream, Lumina2, OmniGen2, and more.
 
 <p>
   <a href="https://ai-toolkit-docs.runcomfy.com/">Docs Home</a> ·
@@ -37,6 +37,7 @@ Note: if your main blocker is environment drift (CUDA/PyTorch/Diffusers versions
 Popular model docs (each page includes defaults + what commonly causes preview mismatch for that model):
 
 - [LTX-2 video T2V/I2V](https://ai-toolkit-docs.runcomfy.com/models/ltx2/) (`model="ltx2"`)
+- [LTX-2.3 video T2V/I2V](https://ai-toolkit-docs.runcomfy.com/models/ltx2.3/) (`model="ltx2.3"`)
 - [Wan 2.2 14B T2V MoE LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-t2v/) (`model="wan22_14b_t2v"`)
 - [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
 - [Z-Image Turbo LoRA inference (few-step defaults)](https://ai-toolkit-docs.runcomfy.com/models/zimage-turbo/) (`model="zimage_turbo"`)
@@ -60,6 +61,7 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 | `v0.7.20.202601291` | `0.7.20`                        | [`a6da9e37ac414658fce66646846648b6ee0407a8`](https://github.com/ostris/ai-toolkit/commit/a6da9e37ac414658fce66646846648b6ee0407a8) |
 | `v0.7.21.202601291` | `0.7.21`                        | [`2db090144a8e6b568104ec5808a2f957545d9c50`](https://github.com/ostris/ai-toolkit/commit/2db090144a8e6b568104ec5808a2f957545d9c50) |
 | `v0.7.23.202602241` | `0.7.23`                        | [`de7d22c9becf5f3385348d9d5ff901536c340d0c`](https://github.com/ostris/ai-toolkit/commit/de7d22c9becf5f3385348d9d5ff901536c340d0c) |
+| `v0.7.24.202603201` | `0.7.24`                        | [`57d407cfd4e2ab884993fb5c7a6373d7e6785b51`](https://github.com/ostris/ai-toolkit/commit/57d407cfd4e2ab884993fb5c7a6373d7e6785b51) |
 
 ---
 

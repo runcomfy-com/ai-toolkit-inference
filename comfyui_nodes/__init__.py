@@ -23,6 +23,7 @@ from .rc_models import (
     RCLumina2,
     RCOmniGen2,
     RCLTX2,
+    RCLTX23,
     RCWan21T2V14B,
     RCWan21T2V1B,
     RCWan21I2V14B,
@@ -80,6 +81,7 @@ NODE_CLASS_MAPPINGS = {
 
     # Video models
     "RCLTX2": RCLTX2,
+    "RCLTX23": RCLTX23,
     "RCWan21T2V14B": RCWan21T2V14B,
     "RCWan21T2V1B": RCWan21T2V1B,
     "RCWan21I2V14B": RCWan21I2V14B,
@@ -128,6 +130,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCOmniGen2": "RC OmniGen2",
 
     "RCLTX2": "RC LTX-2",
+    "RCLTX23": "RC LTX-2.3",
     "RCWan21T2V14B": "RC Wan 2.1 T2V 14B",
     "RCWan21T2V1B": "RC Wan 2.1 T2V 1B",
     "RCWan21I2V14B": "RC Wan 2.1 I2V 14B",

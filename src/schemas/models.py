@@ -68,6 +68,7 @@ class ModelType(str, Enum):
 
     # LTX-2
     LTX2 = "ltx2"  # ltx2.json (supports both T2V and I2V via control_image parameter)
+    LTX2_3 = "ltx2.3"  # LTX-2.3 (supports both T2V and I2V via control_image parameter)
 
 
 def get_supported_models() -> list[str]:

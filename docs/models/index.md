@@ -70,6 +70,7 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | Model page | API model id | Base checkpoint | Notes |
 |---|---|---|---|
 | [LTX-2](ltx2/) | `ltx2` | `Lightricks/LTX-2` | Unified T2V/I2V: if you provide `ctrl_img` it runs I2V; otherwise T2V. Outputs frames + audio (MP4). LoRA is converted and fused. |
+| [LTX-2.3](ltx2.3/) | `ltx2.3` | `dg845/LTX-2.3-Diffusers` | Same as LTX-2 but with LTX-2.3 base model. Uses VocoderWithBWE for improved audio. |
 | [Wan 2.1 T2V (14B)](wan21-14b/) | `wan21_14b` | `Wan-AI/Wan2.1-T2V-14B-Diffusers` | Text-to-video. Uses `diffusers.WanPipeline`. |
 | [Wan 2.1 T2V (1.3B)](wan21-1b/) | `wan21_1b` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Text-to-video. Smaller checkpoint (1.3B) with the same API surface as 14B. |
 | [Wan 2.1 I2V (14B)](wan21-i2v-14b/) | `wan21_i2v_14b` | `Wan-AI/Wan2.1-I2V-14B-720P-Diffusers` | Image-to-video. Requires `ctrl_img`. The 480p variant `wan21_i2v_14b480p` uses the same logic but a different base checkpoint. Also supports `wan21_i2v_14b480p`. |

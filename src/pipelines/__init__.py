@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from .hidream import HiDreamPipeline, HiDreamE1Pipeline
     from .lumina2 import Lumina2Pipeline
     from .omnigen2 import OmniGen2Pipeline
-    from .ltx2 import LTX2Pipeline
+    from .ltx2 import LTX2Pipeline, LTX23Pipeline
 
 
 # Lazy import mapping: attribute name -> (module_name, class_name)
@@ -99,6 +99,7 @@ _LAZY_IMPORTS = {
     "OmniGen2Pipeline": (".omnigen2", "OmniGen2Pipeline"),
     # LTX-2
     "LTX2Pipeline": (".ltx2", "LTX2Pipeline"),
+    "LTX23Pipeline": (".ltx2", "LTX23Pipeline"),
 }
 
 # Cache for lazily loaded classes
@@ -148,6 +149,7 @@ _MODEL_TYPE_TO_CLASS = {
     ModelType.OMNIGEN2: "OmniGen2Pipeline",
     # LTX-2
     ModelType.LTX2: "LTX2Pipeline",
+    ModelType.LTX2_3: "LTX23Pipeline",
 }
 
 
@@ -248,6 +250,7 @@ __all__ = [
     "OmniGen2Pipeline",
     # LTX-2
     "LTX2Pipeline",
+    "LTX23Pipeline",
     # Registry and helpers
     "get_pipeline_class",
     "get_pipeline_config",
