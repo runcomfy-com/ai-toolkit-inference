@@ -475,3 +475,28 @@ class LTX2Pipeline(BasePipeline):
             del self._i2v_pipe
             self._i2v_pipe = None
         super().unload()
+
+
+class LTX23Pipeline(LTX2Pipeline):
+    """
+    LTX-2.3 pipeline for video generation with audio.
+
+    Inherits all behavior from LTX2Pipeline. The only difference is the base model:
+    dg845/LTX-2.3-Diffusers ships LTX2VocoderWithBWE in its model_index.json,
+    so diffusers from_pretrained() automatically loads the correct vocoder.
+    """
+
+    CONFIG = PipelineConfig(
+        model_type=ModelType.LTX2_3,
+        base_model="dg845/LTX-2.3-Diffusers",
+        resolution_divisor=32,
+        default_steps=25,
+        default_guidance_scale=4.0,
+        requires_control_image=False,
+        is_video_model=True,
+        default_num_frames=41,
+        default_fps=24,
+        enable_cpu_offload=True,
+        lora_merge_method=LoraMergeMethod.SET_ADAPTERS,
+        enable_xformers=True,
+    )

@@ -572,6 +572,19 @@ class RCLTX2(_RCAitkBase):
         return LTX2Pipeline
 
 
+class RCLTX23(_RCAitkBase):
+    MODEL_ID = "ltx2.3"
+    DISPLAY_NAME = "RC LTX-2.3"
+    IS_VIDEO = True
+    DEFAULT_FPS = 24
+    DEFAULT_OFFLOAD_MODE = "model"
+    RESOLUTION_STEP = 32
+
+    def _pipeline_ctor(self):
+        from src.pipelines.ltx2 import LTX23Pipeline
+        return LTX23Pipeline
+
+
 # ===== Wan 2.1 =====
 
 class RCWan21T2V14B(_RCAitkBase):
