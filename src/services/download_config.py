@@ -124,6 +124,9 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
             ExtraDownload(
                 repo_id="dg845/LTX-2.3-Spatial-Upsampler-Diffusers",
             ),
+            ExtraDownload(
+                repo_id="CalamitousFelicitousness/LTX-2.3-distilled-lora-384-Diffusers",
+            ),
         ]
     ),
 }

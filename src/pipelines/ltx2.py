@@ -486,11 +486,21 @@ class LTX23Pipeline(LTX2Pipeline):
     dg845/LTX-2.3-Diffusers ships LTX2VocoderWithBWE in its model_index.json,
     so diffusers from_pretrained() automatically loads the correct vocoder.
 
-    Supports resolution="High" mode which runs inference at half resolution
-    then applies 2x spatial upsampling via LTX2LatentUpsamplerModel.
+    Supports resolution="High" mode: 3-stage upscale workflow following official
+    diffusers examples:
+      Stage 1: Generate at requested resolution → latent output
+      Stage 2: 2x latent upsample via LTX2LatentUpsamplerModel
+      Stage 3: Denoise upsampled latents with distilled LoRA (3 steps, guidance=1.0)
+    Output is 2x the requested resolution.
     """
 
     UPSAMPLER_REPO = "dg845/LTX-2.3-Spatial-Upsampler-Diffusers"
+    DISTILLED_LORA_REPO = "CalamitousFelicitousness/LTX-2.3-distilled-lora-384-Diffusers"
+    DISTILLED_LORA_ADAPTER = "stage_2_distilled"
+    DISTILLED_LORA_SCALE = 0.8  # Official recommendation: 0.6–0.8
+
+    # Sigma schedules from diffusers.pipelines.ltx2.utils
+    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875]
 
     CONFIG = PipelineConfig(
         model_type=ModelType.LTX2_3,
@@ -511,6 +521,7 @@ class LTX23Pipeline(LTX2Pipeline):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._upsample_pipe = None
+        self._distilled_lora_loaded = False
 
     def _get_upsample_pipeline(self):
         """Get or create the latent upsampler pipeline."""
@@ -534,19 +545,33 @@ class LTX23Pipeline(LTX2Pipeline):
         )
         self._upsample_pipe.vae.enable_tiling()
 
-        # Apply offload strategy consistent with the main pipeline
-        if self.offload_mode == "sequential":
-            if hasattr(self._upsample_pipe, "enable_sequential_cpu_offload"):
-                self._upsample_pipe.enable_sequential_cpu_offload()
-            else:
-                self._upsample_pipe.enable_model_cpu_offload()
-        elif self.offload_mode == "model":
-            self._upsample_pipe.enable_model_cpu_offload()
+        # Only handle latent_upsampler placement — the shared VAE already has
+        # offload hooks from the main pipeline; calling enable_*_cpu_offload()
+        # on _upsample_pipe would re-register hooks on the shared VAE and break
+        # the main pipeline's offload state.
+        if self.offload_mode == "none":
+            latent_upsampler.to(self.device)
         else:
-            self._upsample_pipe.to(self.device)
+            latent_upsampler.to("cpu")
 
         logger.info("Latent upsampler loaded")
         return self._upsample_pipe
+
+    def _load_distilled_lora(self):
+        """Load the stage-2 distilled LoRA adapter for High mode denoising."""
+        if self._distilled_lora_loaded:
+            return
+
+        logger.info(f"Loading distilled LoRA from: {self.DISTILLED_LORA_REPO}")
+        t0 = time.perf_counter()
+        self.pipe.load_lora_weights(
+            self.DISTILLED_LORA_REPO,
+            adapter_name=self.DISTILLED_LORA_ADAPTER,
+            token=self.hf_token,
+        )
+        load_time = time.perf_counter() - t0
+        logger.info(f"[TIMING] distilled_lora_load: {load_time:.3f}s")
+        self._distilled_lora_loaded = True
 
     def _run_inference(
         self,
@@ -564,7 +589,15 @@ class LTX23Pipeline(LTX2Pipeline):
         resolution: Optional[str] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Run LTX-2.3 inference with optional 2x upscale."""
+        """Run LTX-2.3 inference with optional 2x upscale.
+
+        Default mode: standard single-pass inference at requested resolution.
+        High mode (3-stage official workflow):
+          Stage 1: Generate at requested resolution → latent
+          Stage 2: 2x latent upsample
+          Stage 3: Denoise upsampled latents with distilled LoRA (3 steps)
+          Output: 2x the requested resolution
+        """
         if resolution != "High":
             return super()._run_inference(
                 prompt=prompt,
@@ -580,35 +613,22 @@ class LTX23Pipeline(LTX2Pipeline):
                 fps=fps,
             )
 
-        # High resolution mode: stage 1 at half res → 2x upsample.
-        # 2x upscale requires dimensions divisible by 64 (= 32 * 2) so that
-        # the half-resolution stage lands on a clean 32px grid.
-        # Auto-snap to nearest 64-grid (round to nearest, prefer larger).
-        divisor = self.CONFIG.resolution_divisor
-        grid = divisor * 2  # 64
-        snapped_w = ((width + grid // 2) // grid) * grid
-        snapped_h = ((height + grid // 2) // grid) * grid
-        if snapped_w != width or snapped_h != height:
-            logger.warning(
-                f"High mode: snapping {width}x{height} to {snapped_w}x{snapped_h} "
-                f"(must be divisible by {grid} for 2x upscale)"
-            )
-            width = snapped_w
-            height = snapped_h
-        half_w = width // 2
-        half_h = height // 2
+        # High resolution mode: 3-stage workflow
+        # Output will be 2x the requested width/height.
+        out_w = width * 2
+        out_h = height * 2
         logger.info(
-            f"High resolution mode: stage 1 at {half_w}x{half_h}, "
-            f"upsample to {width}x{height}"
+            f"High resolution mode: stage 1 at {width}x{height}, "
+            f"upsample+denoise to {out_w}x{out_h}"
         )
 
-        # Stage 1: run at half resolution with latent output to avoid decode+re-encode
+        # === Stage 1: Generate at requested resolution → latent ===
         t0 = time.perf_counter()
         common_kwargs = {
             "prompt": prompt,
             "negative_prompt": negative_prompt or "",
-            "height": half_h,
-            "width": half_w,
+            "height": height,
+            "width": width,
             "num_frames": num_frames,
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
@@ -620,7 +640,7 @@ class LTX23Pipeline(LTX2Pipeline):
 
         if control_image is not None:
             pipe = self._get_i2v_pipeline()
-            control_image = control_image.resize((half_w, half_h), Image.LANCZOS)
+            control_image = control_image.resize((width, height), Image.LANCZOS)
             common_kwargs["image"] = control_image
         else:
             pipe = self.pipe
@@ -630,15 +650,14 @@ class LTX23Pipeline(LTX2Pipeline):
         stage1_time = time.perf_counter() - t0
         logger.info(f"[TIMING] stage1_inference: {stage1_time:.3f}s")
 
-        # Decode audio from latents (audio_latents are raw, not decoded in latent mode)
-        # Note: after pipe() returns, maybe_free_model_hooks() may have moved models to CPU.
-        # Explicitly move audio components to the correct device before decoding.
+        # Decode audio from latents (not decoded in latent output mode).
+        # After pipe() returns, maybe_free_model_hooks() may have moved models to CPU.
         t0 = time.perf_counter()
         device = video_latents.device
         pipe.audio_vae.to(device)
         pipe.vocoder.to(device)
-        audio_latents_decoded = audio_latents.to(device=device, dtype=pipe.audio_vae.dtype)
-        generated_mel = pipe.audio_vae.decode(audio_latents_decoded, return_dict=False)[0]
+        audio_latents_on_device = audio_latents.to(device=device, dtype=pipe.audio_vae.dtype)
+        generated_mel = pipe.audio_vae.decode(audio_latents_on_device, return_dict=False)[0]
         audio = pipe.vocoder(generated_mel)
         audio_decode_time = time.perf_counter() - t0
         logger.info(f"[TIMING] audio_decode: {audio_decode_time:.3f}s")
@@ -656,31 +675,95 @@ class LTX23Pipeline(LTX2Pipeline):
             if audio_tensor is not None:
                 audio_tensor = audio_tensor.float().cpu()
 
-        # Stage 2: latent upsample (2x spatial)
+        # === Stage 2: 2x latent upsample ===
         t0 = time.perf_counter()
         upsample_pipe = self._get_upsample_pipeline()
 
-        # video_latents from stage 1 are already denormalized (diffusers denormalizes before output_type check)
-        upsampled_video = upsample_pipe(
+        if self.offload_mode != "none":
+            upsample_pipe.latent_upsampler.to(device)
+
+        upscaled_latents = upsample_pipe(
             latents=video_latents,
-            latents_normalized=False,
-            height=half_h,
-            width=half_w,
-            num_frames=num_frames,
-            output_type="np",
+            output_type="latent",
             return_dict=False,
         )[0]
+
+        if self.offload_mode != "none":
+            upsample_pipe.latent_upsampler.to("cpu")
+            torch.cuda.empty_cache()
+
         upsample_time = time.perf_counter() - t0
         logger.info(f"[TIMING] latent_upsample: {upsample_time:.3f}s")
 
+        # === Stage 3: Denoise upsampled latents with distilled LoRA ===
+        t0 = time.perf_counter()
+        self._load_distilled_lora()
+
+        # Remember current adapters so we can restore after stage 3
+        had_user_lora = self.lora_loaded and hasattr(self, '_current_lora_paths') and self._current_lora_paths
+        if had_user_lora:
+            # Activate distilled adapter alongside user LoRA
+            self.pipe.set_adapters(
+                [self.DISTILLED_LORA_ADAPTER, "lora"],
+                [self.DISTILLED_LORA_SCALE, self._current_lora_scale],
+            )
+        else:
+            self.pipe.set_adapters([self.DISTILLED_LORA_ADAPTER], [self.DISTILLED_LORA_SCALE])
+
+        # Use a non-dynamic-shifting scheduler for stage 3
+        from diffusers import FlowMatchEulerDiscreteScheduler
+        original_scheduler = self.pipe.scheduler
+        self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            original_scheduler.config, use_dynamic_shifting=False, shift_terminal=None
+        )
+
+        # Enable VAE tiling for large 2x resolution
+        self.pipe.vae.enable_tiling()
+
+        stage3_kwargs = {
+            "latents": upscaled_latents,
+            "audio_latents": audio_latents,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "width": out_w,
+            "height": out_h,
+            "num_frames": num_frames,
+            "num_inference_steps": 3,
+            "noise_scale": self.STAGE_2_DISTILLED_SIGMA_VALUES[0],
+            "sigmas": self.STAGE_2_DISTILLED_SIGMA_VALUES,
+            "guidance_scale": 1.0,
+            "frame_rate": fps,
+            "output_type": "np",
+            "return_dict": False,
+        }
+
+        self._inject_diffusers_callback_kwargs(stage3_kwargs, total_steps=3, pipe=self.pipe)
+        video, _ = self.pipe(**stage3_kwargs)
+        # Audio was already decoded from stage 1; stage 3 audio output is ignored.
+
+        # Restore original scheduler
+        self.pipe.scheduler = original_scheduler
+
+        # Restore adapter state
+        if had_user_lora:
+            self.pipe.set_adapters(["lora"], [self._current_lora_scale])
+        else:
+            # Deactivate distilled adapter (keep loaded for next call)
+            self.pipe.set_adapters([self.DISTILLED_LORA_ADAPTER], [0.0])
+
+        stage3_time = time.perf_counter() - t0
+        logger.info(f"[TIMING] stage3_denoise: {stage3_time:.3f}s")
+
+        total_time = stage1_time + audio_decode_time + upsample_time + stage3_time
         logger.info(
-            f"[TIMING] high_res_total: {stage1_time + audio_decode_time + upsample_time:.3f}s "
-            f"(stage1={stage1_time:.3f}s, audio={audio_decode_time:.3f}s, upsample={upsample_time:.3f}s)"
+            f"[TIMING] high_res_total: {total_time:.3f}s "
+            f"(stage1={stage1_time:.3f}s, audio={audio_decode_time:.3f}s, "
+            f"upsample={upsample_time:.3f}s, stage3={stage3_time:.3f}s)"
         )
 
         # Convert to uint8 tensor
-        upsampled_video = (upsampled_video * 255).round().astype("uint8")
-        video_tensor = torch.from_numpy(upsampled_video[0])
+        video = (video * 255).round().astype("uint8")
+        video_tensor = torch.from_numpy(video[0])
 
         return {
             "video_tensor": video_tensor,
@@ -694,4 +777,5 @@ class LTX23Pipeline(LTX2Pipeline):
         if self._upsample_pipe is not None:
             del self._upsample_pipe
             self._upsample_pipe = None
+        self._distilled_lora_loaded = False
         super().unload()
