@@ -4,7 +4,7 @@ Request schemas for inference API.
 Parameter names match inference_schema JSON files exactly.
 """
 
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, get_args
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -47,6 +47,11 @@ class PromptItem(BaseModel):
     # Video parameters
     num_frames: Optional[int] = Field(default=None, ge=1, le=1000, description="Num Frames")
     fps: Optional[int] = Field(default=None, ge=1, le=120, description="FPS")
+
+    # Resolution mode (Default or High for 2x upscale, LTX-2.3 only)
+    resolution: Optional[Literal["Default", "High"]] = Field(
+        default=None, description="Resolution mode: Default or High (2x upscale)"
+    )
 
     # Control images (matches inference_schema)
     ctrl_img: Optional[str] = Field(default=None, description="Control image as base64 or URL")

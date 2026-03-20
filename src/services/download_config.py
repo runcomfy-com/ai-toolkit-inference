@@ -119,6 +119,9 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
         ]
     ),
     # LTX-2.3
+    # Note: Spatial upsampler and distilled LoRA are NOT predownloaded here.
+    # They are lazy-loaded on first High-mode request in LTX23Pipeline to avoid
+    # making them unconditional dependencies for Default-mode requests.
     ModelType.LTX2_3: DownloadConfig(),
 }
 

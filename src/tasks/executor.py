@@ -39,6 +39,7 @@ class PromptParams:
     seed: int
     num_frames: int
     fps: int
+    resolution: Optional[str] = None
     control_image: Optional[Image.Image] = None
     control_images: Optional[List[Image.Image]] = None
 
@@ -320,7 +321,7 @@ class InferenceExecutor:
         self._log_generate_params(params, prompt_idx, total_prompts, extra_log)
 
         with Timer(f"prompt_{prompt_idx}_generate") as t:
-            result = pipeline.generate(
+            generate_kwargs = dict(
                 prompt=params.prompt,
                 negative_prompt=params.negative_prompt,
                 width=params.width,
@@ -333,6 +334,9 @@ class InferenceExecutor:
                 num_frames=params.num_frames,
                 fps=params.fps,
             )
+            if params.resolution:
+                generate_kwargs["resolution"] = params.resolution
+            result = pipeline.generate(**generate_kwargs)
         timing["generate"] = t.elapsed
 
         return PromptResult(result=result, params=params, timing=timing)
@@ -386,11 +390,22 @@ class InferenceExecutor:
                 output_format = "webp"
         timing["save"] = t.elapsed
 
+        # Use actual video dimensions from tensor (may differ from params in High resolution mode)
+        if video_tensor is not None:
+            actual_width = video_tensor.shape[2]   # [T, H, W, C]
+            actual_height = video_tensor.shape[1]
+        elif frames:
+            actual_width = frames[0].width
+            actual_height = frames[0].height
+        else:
+            actual_width = params.width
+            actual_height = params.height
+
         outputs["videos"].append(
             {
                 "format": output_format,
-                "width": params.width,
-                "height": params.height,
+                "width": actual_width,
+                "height": actual_height,
                 "num_frames": num_frames_out,
                 "fps": params.fps,
                 "file_path": output_path,
@@ -455,6 +470,7 @@ class InferenceExecutor:
             if prompt_item.num_frames is not None
             else pipeline_defaults.get("num_frames", 1),
             fps=prompt_item.fps if prompt_item.fps is not None else pipeline_defaults.get("fps", 16),
+            resolution=prompt_item.resolution,
         )
 
     def _load_control_images(
