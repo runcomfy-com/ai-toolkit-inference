@@ -118,6 +118,8 @@ class PipelineConfig:
     default_network_multiplier: float = 1.0
     # Enable xformers memory efficient attention
     enable_xformers: bool = False
+    # Supported resolution modes (e.g., ["Default", "High"] for 2x upscale)
+    supported_resolution_modes: Optional[List[str]] = None
 
 
 class BasePipeline(ABC):
@@ -722,6 +724,7 @@ class BasePipeline(ABC):
         output_type: str = "pil",
         latents: Optional[torch.Tensor] = None,
         denoise_strength: float = 1.0,
+        resolution: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate image/video.
@@ -745,6 +748,15 @@ class BasePipeline(ABC):
         Returns:
             Dict with "image" or "frames" or "latents" key, plus "seed".
         """
+        # Validate resolution mode
+        if resolution is not None and resolution != "Default":
+            supported = self.CONFIG.supported_resolution_modes
+            if supported is None or resolution not in supported:
+                raise ValueError(
+                    f"{self.__class__.__name__} does not support resolution='{resolution}'. "
+                    f"Supported: {supported or ['Default']}"
+                )
+
         # Apply defaults from config
         if num_inference_steps is None:
             num_inference_steps = self.CONFIG.default_steps
@@ -794,9 +806,10 @@ class BasePipeline(ABC):
                     output_type=output_type,
                     latents=latents,
                     denoise_strength=denoise_strength,
+                    resolution=resolution,
                 )
             except TypeError:
-                # Fallback for pipelines that don't support output_type/latents yet
+                # Fallback for pipelines that don't support output_type/latents/resolution yet
                 if output_type != "pil" or latents is not None:
                     raise NotImplementedError(
                         f"{self.__class__.__name__} does not support output_type='{output_type}' or latents input yet"

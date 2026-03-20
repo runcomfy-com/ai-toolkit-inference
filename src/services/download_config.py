@@ -119,7 +119,13 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
         ]
     ),
     # LTX-2.3
-    ModelType.LTX2_3: DownloadConfig(),
+    ModelType.LTX2_3: DownloadConfig(
+        extras=[
+            ExtraDownload(
+                repo_id="dg845/LTX-2.3-Spatial-Upsampler-Diffusers",
+            ),
+        ]
+    ),
 }
 
 

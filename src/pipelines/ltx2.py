@@ -485,7 +485,12 @@ class LTX23Pipeline(LTX2Pipeline):
     Inherits all behavior from LTX2Pipeline. The only difference is the base model:
     dg845/LTX-2.3-Diffusers ships LTX2VocoderWithBWE in its model_index.json,
     so diffusers from_pretrained() automatically loads the correct vocoder.
+
+    Supports resolution="High" mode which runs inference at half resolution
+    then applies 2x spatial upsampling via LTX2LatentUpsamplerModel.
     """
+
+    UPSAMPLER_REPO = "dg845/LTX-2.3-Spatial-Upsampler-Diffusers"
 
     CONFIG = PipelineConfig(
         model_type=ModelType.LTX2_3,
@@ -500,4 +505,189 @@ class LTX23Pipeline(LTX2Pipeline):
         enable_cpu_offload=True,
         lora_merge_method=LoraMergeMethod.SET_ADAPTERS,
         enable_xformers=True,
+        supported_resolution_modes=["Default", "High"],
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._upsample_pipe = None
+
+    def _get_upsample_pipeline(self):
+        """Get or create the latent upsampler pipeline."""
+        if self._upsample_pipe is not None:
+            return self._upsample_pipe
+
+        from diffusers.pipelines.ltx2.latent_upsampler import LTX2LatentUpsamplerModel
+        from diffusers.pipelines.ltx2.pipeline_ltx2_latent_upsample import LTX2LatentUpsamplePipeline
+
+        logger.info(f"Loading latent upsampler from: {self.UPSAMPLER_REPO}")
+        latent_upsampler = LTX2LatentUpsamplerModel.from_pretrained(
+            self.UPSAMPLER_REPO,
+            subfolder="latent_upsampler",
+            torch_dtype=self.dtype,
+            token=self.hf_token,
+        )
+
+        self._upsample_pipe = LTX2LatentUpsamplePipeline(
+            vae=self.pipe.vae,
+            latent_upsampler=latent_upsampler,
+        )
+        self._upsample_pipe.vae.enable_tiling()
+
+        # Apply offload strategy consistent with the main pipeline
+        if self.offload_mode == "sequential":
+            if hasattr(self._upsample_pipe, "enable_sequential_cpu_offload"):
+                self._upsample_pipe.enable_sequential_cpu_offload()
+            else:
+                self._upsample_pipe.enable_model_cpu_offload()
+        elif self.offload_mode == "model":
+            self._upsample_pipe.enable_model_cpu_offload()
+        else:
+            self._upsample_pipe.to(self.device)
+
+        logger.info("Latent upsampler loaded")
+        return self._upsample_pipe
+
+    def _run_inference(
+        self,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        num_inference_steps: int,
+        guidance_scale: float,
+        generator: torch.Generator,
+        control_image: Optional[Image.Image] = None,
+        control_images: Optional[list] = None,
+        num_frames: int = 41,
+        fps: int = 24,
+        resolution: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Run LTX-2.3 inference with optional 2x upscale."""
+        if resolution != "High":
+            return super()._run_inference(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                control_image=control_image,
+                control_images=control_images,
+                num_frames=num_frames,
+                fps=fps,
+            )
+
+        # High resolution mode: stage 1 at half res → 2x upsample.
+        # 2x upscale requires dimensions divisible by 64 (= 32 * 2) so that
+        # the half-resolution stage lands on a clean 32px grid.
+        divisor = self.CONFIG.resolution_divisor
+        grid = divisor * 2  # 64
+        if width % grid != 0 or height % grid != 0:
+            raise ValueError(
+                f"High resolution mode requires width and height divisible by {grid}, "
+                f"got {width}x{height}. Try {(width // grid) * grid}x{(height // grid) * grid} "
+                f"or {((width + grid - 1) // grid) * grid}x{((height + grid - 1) // grid) * grid}."
+            )
+        half_w = width // 2
+        half_h = height // 2
+        logger.info(
+            f"High resolution mode: stage 1 at {half_w}x{half_h}, "
+            f"upsample to {width}x{height}"
+        )
+
+        # Stage 1: run at half resolution with latent output to avoid decode+re-encode
+        t0 = time.perf_counter()
+        common_kwargs = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "height": half_h,
+            "width": half_w,
+            "num_frames": num_frames,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "generator": generator,
+            "frame_rate": fps,
+            "output_type": "latent",
+            "return_dict": False,
+        }
+
+        if control_image is not None:
+            pipe = self._get_i2v_pipeline()
+            control_image = control_image.resize((half_w, half_h), Image.LANCZOS)
+            common_kwargs["image"] = control_image
+        else:
+            pipe = self.pipe
+
+        self._inject_diffusers_callback_kwargs(common_kwargs, total_steps=num_inference_steps, pipe=pipe)
+        video_latents, audio_latents = pipe(**common_kwargs)
+        stage1_time = time.perf_counter() - t0
+        logger.info(f"[TIMING] stage1_inference: {stage1_time:.3f}s")
+
+        # Decode audio from latents (audio_latents are raw, not decoded in latent mode)
+        # Note: after pipe() returns, maybe_free_model_hooks() may have moved models to CPU.
+        # Explicitly move audio components to the correct device before decoding.
+        t0 = time.perf_counter()
+        device = video_latents.device
+        pipe.audio_vae.to(device)
+        pipe.vocoder.to(device)
+        audio_latents_decoded = audio_latents.to(device=device, dtype=pipe.audio_vae.dtype)
+        generated_mel = pipe.audio_vae.decode(audio_latents_decoded, return_dict=False)[0]
+        audio = pipe.vocoder(generated_mel)
+        audio_decode_time = time.perf_counter() - t0
+        logger.info(f"[TIMING] audio_decode: {audio_decode_time:.3f}s")
+
+        audio_sample_rate = 24000
+        if hasattr(pipe, "vocoder") and hasattr(pipe.vocoder, "config"):
+            audio_sample_rate = getattr(pipe.vocoder.config, "output_sampling_rate", 24000)
+
+        audio_tensor = None
+        if audio is not None:
+            if isinstance(audio, list):
+                audio_tensor = audio[0] if len(audio) > 0 else None
+            else:
+                audio_tensor = audio
+            if audio_tensor is not None:
+                audio_tensor = audio_tensor.float().cpu()
+
+        # Stage 2: latent upsample (2x spatial)
+        t0 = time.perf_counter()
+        upsample_pipe = self._get_upsample_pipeline()
+
+        # video_latents from stage 1 are already denormalized (diffusers denormalizes before output_type check)
+        upsampled_video = upsample_pipe(
+            latents=video_latents,
+            latents_normalized=False,
+            height=half_h,
+            width=half_w,
+            num_frames=num_frames,
+            output_type="np",
+            return_dict=False,
+        )[0]
+        upsample_time = time.perf_counter() - t0
+        logger.info(f"[TIMING] latent_upsample: {upsample_time:.3f}s")
+
+        logger.info(
+            f"[TIMING] high_res_total: {stage1_time + audio_decode_time + upsample_time:.3f}s "
+            f"(stage1={stage1_time:.3f}s, audio={audio_decode_time:.3f}s, upsample={upsample_time:.3f}s)"
+        )
+
+        # Convert to uint8 tensor
+        upsampled_video = (upsampled_video * 255).round().astype("uint8")
+        video_tensor = torch.from_numpy(upsampled_video[0])
+
+        return {
+            "video_tensor": video_tensor,
+            "fps": fps,
+            "audio": audio_tensor,
+            "audio_sample_rate": audio_sample_rate,
+        }
+
+    def unload(self):
+        """Unload the pipeline and upsampler to free memory."""
+        if self._upsample_pipe is not None:
+            del self._upsample_pipe
+            self._upsample_pipe = None
+        super().unload()
