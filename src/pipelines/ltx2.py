@@ -441,10 +441,10 @@ class LTX2Pipeline(BasePipeline):
         self._inject_diffusers_callback_kwargs(common_kwargs, total_steps=num_inference_steps, pipe=pipe)
         video, audio = pipe(**common_kwargs)
 
-        # video is numpy array [batch, frames, channels, height, width]
-        # Convert to torch tensor and scale to uint8 (aligned with ai-toolkit)
+        # video is numpy array [batch, frames, height, width, channels] (from VideoProcessor.postprocess_video)
+        # Convert to torch tensor and scale to uint8
         video = (video * 255).round().astype("uint8")
-        video_tensor = torch.from_numpy(video[0])  # [frames, channels, height, width]
+        video_tensor = torch.from_numpy(video[0])  # [T, H, W, C]
 
         # Get audio sample rate from vocoder config
         audio_sample_rate = 24000  # Default
@@ -462,7 +462,7 @@ class LTX2Pipeline(BasePipeline):
                 audio_tensor = audio_tensor.float().cpu()
 
         # Return video tensor and audio for encode_video
-        # video_tensor is [T, C, H, W] uint8 torch tensor
+        # video_tensor is [T, H, W, C] uint8 torch tensor
         return {
             "video_tensor": video_tensor,
             "fps": fps,

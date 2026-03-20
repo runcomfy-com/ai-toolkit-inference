@@ -392,8 +392,8 @@ class InferenceExecutor:
 
         # Use actual video dimensions from tensor (may differ from params in High resolution mode)
         if video_tensor is not None:
-            actual_width = video_tensor.shape[3]   # [T, C, H, W]
-            actual_height = video_tensor.shape[2]
+            actual_width = video_tensor.shape[2]   # [T, H, W, C]
+            actual_height = video_tensor.shape[1]
         elif frames:
             actual_width = frames[0].width
             actual_height = frames[0].height
