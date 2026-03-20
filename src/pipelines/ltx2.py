@@ -583,14 +583,18 @@ class LTX23Pipeline(LTX2Pipeline):
         # High resolution mode: stage 1 at half res → 2x upsample.
         # 2x upscale requires dimensions divisible by 64 (= 32 * 2) so that
         # the half-resolution stage lands on a clean 32px grid.
+        # Auto-snap to nearest 64-grid (round to nearest, prefer larger).
         divisor = self.CONFIG.resolution_divisor
         grid = divisor * 2  # 64
-        if width % grid != 0 or height % grid != 0:
-            raise ValueError(
-                f"High resolution mode requires width and height divisible by {grid}, "
-                f"got {width}x{height}. Try {(width // grid) * grid}x{(height // grid) * grid} "
-                f"or {((width + grid - 1) // grid) * grid}x{((height + grid - 1) // grid) * grid}."
+        snapped_w = ((width + grid // 2) // grid) * grid
+        snapped_h = ((height + grid // 2) // grid) * grid
+        if snapped_w != width or snapped_h != height:
+            logger.warning(
+                f"High mode: snapping {width}x{height} to {snapped_w}x{snapped_h} "
+                f"(must be divisible by {grid} for 2x upscale)"
             )
+            width = snapped_w
+            height = snapped_h
         half_w = width // 2
         half_h = height // 2
         logger.info(
