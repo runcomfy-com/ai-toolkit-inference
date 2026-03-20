@@ -417,6 +417,7 @@ class LTX2Pipeline(BasePipeline):
             "num_inference_steps": num_inference_steps,
             "guidance_scale": guidance_scale,
             "generator": generator,
+            "frame_rate": fps,
             "output_type": "np",  # numpy array [batch, frames, channels, height, width]
             "return_dict": False,
         }
