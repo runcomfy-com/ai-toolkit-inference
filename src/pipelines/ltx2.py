@@ -702,7 +702,6 @@ class LTX23Pipeline(LTX2Pipeline):
         # Remember current adapters so we can restore after stage 3
         had_user_lora = self.lora_loaded and hasattr(self, '_current_lora_paths') and self._current_lora_paths
         if had_user_lora:
-            # Activate distilled adapter alongside user LoRA
             self.pipe.set_adapters(
                 [self.DISTILLED_LORA_ADAPTER, "lora"],
                 [self.DISTILLED_LORA_SCALE, self._current_lora_scale],
@@ -710,7 +709,7 @@ class LTX23Pipeline(LTX2Pipeline):
         else:
             self.pipe.set_adapters([self.DISTILLED_LORA_ADAPTER], [self.DISTILLED_LORA_SCALE])
 
-        # Use a non-dynamic-shifting scheduler for stage 3
+        # Swap scheduler for stage 3 (non-dynamic-shifting)
         from diffusers import FlowMatchEulerDiscreteScheduler
         original_scheduler = self.pipe.scheduler
         self.pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
@@ -720,36 +719,33 @@ class LTX23Pipeline(LTX2Pipeline):
         # Enable VAE tiling for large 2x resolution
         self.pipe.vae.enable_tiling()
 
-        stage3_kwargs = {
-            "latents": upscaled_latents,
-            "audio_latents": audio_latents,
-            "prompt": prompt,
-            "negative_prompt": negative_prompt or "",
-            "width": out_w,
-            "height": out_h,
-            "num_frames": num_frames,
-            "num_inference_steps": 3,
-            "noise_scale": self.STAGE_2_DISTILLED_SIGMA_VALUES[0],
-            "sigmas": self.STAGE_2_DISTILLED_SIGMA_VALUES,
-            "guidance_scale": 1.0,
-            "frame_rate": fps,
-            "output_type": "np",
-            "return_dict": False,
-        }
+        try:
+            stage3_kwargs = {
+                "latents": upscaled_latents,
+                "audio_latents": audio_latents,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt or "",
+                "width": out_w,
+                "height": out_h,
+                "num_frames": num_frames,
+                "num_inference_steps": 3,
+                "noise_scale": self.STAGE_2_DISTILLED_SIGMA_VALUES[0],
+                "sigmas": self.STAGE_2_DISTILLED_SIGMA_VALUES,
+                "guidance_scale": 1.0,
+                "frame_rate": fps,
+                "output_type": "np",
+                "return_dict": False,
+            }
 
-        self._inject_diffusers_callback_kwargs(stage3_kwargs, total_steps=3, pipe=self.pipe)
-        video, _ = self.pipe(**stage3_kwargs)
-        # Audio was already decoded from stage 1; stage 3 audio output is ignored.
-
-        # Restore original scheduler
-        self.pipe.scheduler = original_scheduler
-
-        # Restore adapter state
-        if had_user_lora:
-            self.pipe.set_adapters(["lora"], [self._current_lora_scale])
-        else:
-            # Deactivate distilled adapter (keep loaded for next call)
-            self.pipe.set_adapters([self.DISTILLED_LORA_ADAPTER], [0.0])
+            self._inject_diffusers_callback_kwargs(stage3_kwargs, total_steps=3, pipe=self.pipe)
+            video, _ = self.pipe(**stage3_kwargs)
+        finally:
+            # Always restore pipeline state so later requests aren't poisoned
+            self.pipe.scheduler = original_scheduler
+            if had_user_lora:
+                self.pipe.set_adapters(["lora"], [self._current_lora_scale])
+            else:
+                self.pipe.set_adapters([self.DISTILLED_LORA_ADAPTER], [0.0])
 
         stage3_time = time.perf_counter() - t0
         logger.info(f"[TIMING] stage3_denoise: {stage3_time:.3f}s")
