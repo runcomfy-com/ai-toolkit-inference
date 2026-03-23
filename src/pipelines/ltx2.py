@@ -573,7 +573,9 @@ class LTX23Pipeline(LTX2Pipeline):
         logger.info(f"[TIMING] distilled_lora_load: {load_time:.3f}s")
         self._distilled_lora_loaded = True
 
-    def _run_inference(
+    # ── Public composable methods for 3-stage workflow ──────────────
+
+    def generate_latent(
         self,
         prompt: str,
         negative_prompt: str,
@@ -583,46 +585,15 @@ class LTX23Pipeline(LTX2Pipeline):
         guidance_scale: float,
         generator: torch.Generator,
         control_image: Optional[Image.Image] = None,
-        control_images: Optional[list] = None,
         num_frames: int = 41,
         fps: int = 24,
-        resolution: Optional[str] = None,
-        **kwargs,
     ) -> Dict[str, Any]:
-        """Run LTX-2.3 inference with optional 2x upscale.
+        """Stage 1: Generate video at given resolution, returning raw latents.
 
-        Default mode: standard single-pass inference at requested resolution.
-        High mode (3-stage official workflow):
-          Stage 1: Generate at requested resolution → latent
-          Stage 2: 2x latent upsample
-          Stage 3: Denoise upsampled latents with distilled LoRA (3 steps)
-          Output: 2x the requested resolution
+        Returns dict with keys:
+            video_latents, audio_latents, audio_tensor, audio_sample_rate,
+            prompt, negative_prompt, width, height, num_frames, fps.
         """
-        if resolution != "High":
-            return super()._run_inference(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                generator=generator,
-                control_image=control_image,
-                control_images=control_images,
-                num_frames=num_frames,
-                fps=fps,
-            )
-
-        # High resolution mode: 3-stage workflow
-        # Output will be 2x the requested width/height.
-        out_w = width * 2
-        out_h = height * 2
-        logger.info(
-            f"High resolution mode: stage 1 at {width}x{height}, "
-            f"upsample+denoise to {out_w}x{out_h}"
-        )
-
-        # === Stage 1: Generate at requested resolution → latent ===
         t0 = time.perf_counter()
         common_kwargs = {
             "prompt": prompt,
@@ -681,9 +652,27 @@ class LTX23Pipeline(LTX2Pipeline):
             pipe.vocoder.to("cpu")
             torch.cuda.empty_cache()
 
-        # === Stage 2: 2x latent upsample ===
+        return {
+            "video_latents": video_latents,
+            "audio_latents": audio_latents,
+            "audio_tensor": audio_tensor,
+            "audio_sample_rate": audio_sample_rate,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "fps": fps,
+        }
+
+    def latent_upscale(self, video_latents: torch.Tensor) -> torch.Tensor:
+        """Stage 2: 2x spatial upsample of video latents.
+
+        Returns upscaled video_latents tensor.
+        """
         t0 = time.perf_counter()
         upsample_pipe = self._get_upsample_pipeline()
+        device = video_latents.device
 
         if self.offload_mode != "none":
             upsample_pipe.latent_upsampler.to(device)
@@ -700,8 +689,37 @@ class LTX23Pipeline(LTX2Pipeline):
 
         upsample_time = time.perf_counter() - t0
         logger.info(f"[TIMING] latent_upsample: {upsample_time:.3f}s")
+        return upscaled_latents
 
-        # === Stage 3: Denoise upsampled latents with distilled LoRA ===
+    def denoise_latent(
+        self,
+        video_latents: torch.Tensor,
+        audio_latents: torch.Tensor,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        num_frames: int = 41,
+        fps: int = 24,
+        num_inference_steps: int = 3,
+        sigma_values: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Stage 3: Denoise upsampled latents with distilled LoRA.
+
+        Args:
+            video_latents: Upscaled video latent tensor from stage 2.
+            audio_latents: Audio latent tensor from stage 1.
+            prompt/negative_prompt: Text prompts.
+            width/height: Final output pixel dimensions (should be 2x stage-1).
+            num_frames/fps: Video parameters.
+            num_inference_steps: Denoise steps (default 3 for distilled).
+            sigma_values: Custom sigma schedule. None uses official defaults.
+
+        Returns dict with video_tensor [T,H,W,C] uint8.
+        """
+        if sigma_values is None:
+            sigma_values = list(self.STAGE_2_DISTILLED_SIGMA_VALUES)
+
         t0 = time.perf_counter()
         self._load_distilled_lora()
 
@@ -727,23 +745,23 @@ class LTX23Pipeline(LTX2Pipeline):
 
         try:
             stage3_kwargs = {
-                "latents": upscaled_latents,
+                "latents": video_latents,
                 "audio_latents": audio_latents,
                 "prompt": prompt,
                 "negative_prompt": negative_prompt or "",
-                "width": out_w,
-                "height": out_h,
+                "width": width,
+                "height": height,
                 "num_frames": num_frames,
-                "num_inference_steps": 3,
-                "noise_scale": self.STAGE_2_DISTILLED_SIGMA_VALUES[0],
-                "sigmas": self.STAGE_2_DISTILLED_SIGMA_VALUES,
+                "num_inference_steps": num_inference_steps,
+                "noise_scale": sigma_values[0],
+                "sigmas": sigma_values,
                 "guidance_scale": 1.0,
                 "frame_rate": fps,
                 "output_type": "np",
                 "return_dict": False,
             }
 
-            self._inject_diffusers_callback_kwargs(stage3_kwargs, total_steps=3, pipe=self.pipe)
+            self._inject_diffusers_callback_kwargs(stage3_kwargs, total_steps=num_inference_steps, pipe=self.pipe)
             video, _ = self.pipe(**stage3_kwargs)
         finally:
             # Always restore pipeline state so later requests aren't poisoned
@@ -756,22 +774,96 @@ class LTX23Pipeline(LTX2Pipeline):
         stage3_time = time.perf_counter() - t0
         logger.info(f"[TIMING] stage3_denoise: {stage3_time:.3f}s")
 
-        total_time = stage1_time + audio_decode_time + upsample_time + stage3_time
-        logger.info(
-            f"[TIMING] high_res_total: {total_time:.3f}s "
-            f"(stage1={stage1_time:.3f}s, audio={audio_decode_time:.3f}s, "
-            f"upsample={upsample_time:.3f}s, stage3={stage3_time:.3f}s)"
-        )
-
         # Convert to uint8 tensor
         video = (video * 255).round().astype("uint8")
         video_tensor = torch.from_numpy(video[0])
 
+        return {"video_tensor": video_tensor}
+
+    # ── _run_inference: orchestrates the 3 stages for API path ────
+
+    def _run_inference(
+        self,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        num_inference_steps: int,
+        guidance_scale: float,
+        generator: torch.Generator,
+        control_image: Optional[Image.Image] = None,
+        control_images: Optional[list] = None,
+        num_frames: int = 41,
+        fps: int = 24,
+        resolution: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Run LTX-2.3 inference with optional 2x upscale.
+
+        Default mode: standard single-pass inference at requested resolution.
+        High mode (3-stage official workflow):
+          Stage 1: Generate at requested resolution → latent
+          Stage 2: 2x latent upsample
+          Stage 3: Denoise upsampled latents with distilled LoRA (3 steps)
+          Output: 2x the requested resolution
+        """
+        if resolution != "High":
+            return super()._run_inference(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                control_image=control_image,
+                control_images=control_images,
+                num_frames=num_frames,
+                fps=fps,
+            )
+
+        # High resolution mode: 3-stage workflow
+        out_w = width * 2
+        out_h = height * 2
+        logger.info(
+            f"High resolution mode: stage 1 at {width}x{height}, "
+            f"upsample+denoise to {out_w}x{out_h}"
+        )
+
+        # Stage 1
+        stage1 = self.generate_latent(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            control_image=control_image,
+            num_frames=num_frames,
+            fps=fps,
+        )
+
+        # Stage 2
+        upscaled_latents = self.latent_upscale(stage1["video_latents"])
+
+        # Stage 3
+        stage3 = self.denoise_latent(
+            video_latents=upscaled_latents,
+            audio_latents=stage1["audio_latents"],
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=out_w,
+            height=out_h,
+            num_frames=num_frames,
+            fps=fps,
+        )
+
         return {
-            "video_tensor": video_tensor,
+            "video_tensor": stage3["video_tensor"],
             "fps": fps,
-            "audio": audio_tensor,
-            "audio_sample_rate": audio_sample_rate,
+            "audio": stage1["audio_tensor"],
+            "audio_sample_rate": stage1["audio_sample_rate"],
         }
 
     def unload(self):

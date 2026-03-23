@@ -42,6 +42,9 @@ from .rc_latent_workflow import (
     RCAITKDecodeLatent,
     RCAITKEncodeImage,
     RCAITKGenerate,
+    RCLTX23GenerateLatent,
+    RCLTX23LatentUpscale,
+    RCLTX23Denoise,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -98,6 +101,11 @@ NODE_CLASS_MAPPINGS = {
     "RCAITKDecodeLatent": RCAITKDecodeLatent,
     "RCAITKEncodeImage": RCAITKEncodeImage,
     "RCAITKGenerate": RCAITKGenerate,
+
+    # LTX-2.3 composable upscale workflow (3-node pattern)
+    "RCLTX23GenerateLatent": RCLTX23GenerateLatent,
+    "RCLTX23LatentUpscale": RCLTX23LatentUpscale,
+    "RCLTX23Denoise": RCLTX23Denoise,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -147,6 +155,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCAITKDecodeLatent": "RC AITK Decode Latent",
     "RCAITKEncodeImage": "RC AITK Encode Image",
     "RCAITKGenerate": "RC AITK Generate",
+
+    # LTX-2.3 composable upscale workflow
+    "RCLTX23GenerateLatent": "RC LTX-2.3 Generate Latent",
+    "RCLTX23LatentUpscale": "RC LTX-2.3 Latent Upscale (2x)",
+    "RCLTX23Denoise": "RC LTX-2.3 Denoise",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

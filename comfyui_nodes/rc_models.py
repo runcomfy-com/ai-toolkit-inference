@@ -200,7 +200,6 @@ class _RCAitkBase:
 
         num_frames = int(kwargs.get("num_frames", self.DEFAULT_NUM_FRAMES)) if self.IS_VIDEO else None
         fps = int(kwargs.get("fps", self.DEFAULT_FPS)) if self.IS_VIDEO else None
-        resolution = kwargs.get("resolution", None)
 
         # Get offload_mode from input or use class default
         offload_mode = kwargs.get("offload_mode", self.DEFAULT_OFFLOAD_MODE)
@@ -290,8 +289,6 @@ class _RCAitkBase:
             num_frames=num_frames,
             fps=fps,
         )
-        if resolution:
-            generate_kwargs["resolution"] = resolution
 
         with comfy_pipeline_observer(int(sample_steps)):
             result = pipe.generate(**generate_kwargs)
@@ -584,15 +581,6 @@ class RCLTX23(_RCAitkBase):
     DEFAULT_FPS = 24
     DEFAULT_OFFLOAD_MODE = "model"
     RESOLUTION_STEP = 32
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        base = super().INPUT_TYPES()
-        base["optional"]["resolution"] = (
-            ["Default", "High"],
-            {"default": "Default", "tooltip": "Default: standard resolution. High: 2x spatial upscale via latent upsampler."},
-        )
-        return base
 
     def _pipeline_ctor(self):
         from src.pipelines.ltx2 import LTX23Pipeline

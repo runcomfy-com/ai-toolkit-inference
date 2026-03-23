@@ -1,0 +1,63 @@
+{
+  "1": {
+    "inputs": {
+      "pipeline": "ltx2.3",
+      "offload_mode": "model",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "Load LTX-2.3 Pipeline"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "prompt": "a beautiful landscape, high quality, photorealistic",
+      "width": 768,
+      "height": 512,
+      "steps": 25,
+      "cfg": 4.0,
+      "seed": 42,
+      "negative_prompt": "",
+      "num_frames": 41,
+      "fps": 24
+    },
+    "class_type": "RCLTX23GenerateLatent",
+    "_meta": {
+      "title": "Stage 1: Generate Latent (768x512)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "ltx_latent": ["2", 0]
+    },
+    "class_type": "RCLTX23LatentUpscale",
+    "_meta": {
+      "title": "Stage 2: Latent Upscale (2x)"
+    }
+  },
+  "4": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "ltx_latent": ["3", 0],
+      "steps": 3,
+      "noise_scale": 0.909375
+    },
+    "class_type": "RCLTX23Denoise",
+    "_meta": {
+      "title": "Stage 3: Denoise (1536x1024)"
+    }
+  },
+  "5": {
+    "inputs": {
+      "filename_prefix": "rc_ltx23_high",
+      "images": ["4", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Frames"
+    }
+  }
+}

@@ -14,7 +14,7 @@ ComfyUI-Manager will automatically:
    - Installs Python dependencies (`requirements-inference.txt`)
    - Clones `ostris/ai-toolkit` into `vendor/ai-toolkit` (required for extended models)
 
-After installation, restart ComfyUI. All nodes—including extended models like FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, and Wan 2.2—should work out of the box.
+After installation, restart ComfyUI. All nodes—including extended models like FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, LTX-2.3, and Wan 2.2—should work out of the box.
 
 ### Option 2: Symlink (for development)
 
@@ -94,6 +94,7 @@ Some nodes require an `IMAGE` input as a control/reference image:
 Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 
 - `RCLTX2`
+- `RCLTX23` — standard single-pass LTX-2.3 video generation
 - `RCWan21T2V14B`, `RCWan21T2V1B`
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
@@ -123,8 +124,8 @@ For advanced workflows with latent manipulation (upscale + second pass, etc.), u
   - Outputs `AITK_LORA` to connect to `RCAITKLoadPipeline`
 
 - **`RCAITKLoadPipeline`** - Load a pipeline with optional LoRA
-  - Supports: SD 1.5, SDXL, Qwen Image, Qwen Image 2512
-  - Outputs `AITK_PIPELINE` for use with sampler/decode nodes
+  - Supports all pipelines (SD 1.5, SDXL, Qwen Image, FLUX, LTX-2.3, Wan, etc.)
+  - Outputs `AITK_PIPELINE` for use with sampler/decode/generate nodes
 
 - **`RCAITKEmptyLatent`** - Create an empty latent (like ComfyUI's EmptyLatentImage)
   - Inputs: `pipe`, `width`, `height`, `batch_size`
@@ -159,6 +160,26 @@ RCAITKLoadPipeline → RCAITKEmptyLatent → RCAITKSampler (1st pass)
 
 See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
 
+#### LTX-2.3 Composable Upscale Workflow (3-node pattern)
+
+For 2x spatial upscale with LTX-2.3, use the 3-node pattern matching the community standard (Lightricks ComfyUI-LTXVideo):
+
+```
+RCAITKLoadPipeline (ltx2.3) ─┬─→ RCLTX23GenerateLatent (Stage 1: generate at input resolution)
+                              │         ↓ LTX23_LATENT
+                              ├─→ RCLTX23LatentUpscale  (Stage 2: 2x spatial upsample)
+                              │         ↓ LTX23_LATENT
+                              └─→ RCLTX23Denoise        (Stage 3: denoise with distilled LoRA)
+                                        ↓ IMAGE
+                                   SaveImage
+```
+
+- **Stage 1** (`RCLTX23GenerateLatent`): Full generation with configurable prompt, steps, cfg, seed. Outputs raw video + audio latents.
+- **Stage 2** (`RCLTX23LatentUpscale`): 2x spatial upsample in latent space. No configurable parameters — just connect and go.
+- **Stage 3** (`RCLTX23Denoise`): Refine upscaled latents with distilled LoRA. Configurable `steps` (default 3) and `noise_scale` (default 0.909375). Outputs decoded video frames (IMAGE).
+
+See `example_workflows/rc_ltx23_high_minimal.json` for a complete example.
+
 ## Available nodes (class types)
 
 - Z-Image:
@@ -190,6 +211,7 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
   - `RCOmniGen2`
 - Video:
   - `RCLTX2`
+  - `RCLTX23`
   - `RCWan21T2V14B`
   - `RCWan21T2V1B`
   - `RCWan21I2V14B`
@@ -204,6 +226,10 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
   - `RCAITKSampler`
   - `RCAITKDecodeLatent`
   - `RCAITKEncodeImage`
+- LTX-2.3 Composable Upscale (3-node pattern):
+  - `RCLTX23GenerateLatent` — Stage 1: generate video latent at given resolution
+  - `RCLTX23LatentUpscale` — Stage 2: 2x spatial latent upsample
+  - `RCLTX23Denoise` — Stage 3: denoise with distilled LoRA, output decoded frames
 
 ## Example workflows
 
@@ -215,6 +241,12 @@ Minimal example workflows are provided in `example_workflows/`:
 - `example_workflows/rc_sd15_minimal.json`
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.
+
+**LTX-2.3 examples**:
+
+- `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 standard video generation (single node)
+- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (3-node workflow: GenerateLatent → LatentUpscale → Denoise)
+- `example_workflows/rc_ltx23_upscale_minimal.json` - LTX-2.3 upscale at smaller input resolution (3-node workflow)
 
 **Latent workflow examples** (upscale + second pass):
 
@@ -234,7 +266,7 @@ Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to m
 
 ## Notes / common issues
 
-- **Extended models** (FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, Wan 2.2) require `ostris/ai-toolkit`.
+- **Extended models** (FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, LTX-2.3, Wan 2.2) require `ostris/ai-toolkit`.
   - If you installed via **ComfyUI-Manager**, ai-toolkit is automatically cloned to `vendor/ai-toolkit`.
   - If you see `ImportError: ... from extensions_built_in...` or `from toolkit...`, ai-toolkit is missing. Run `python install.py` from the node pack folder to fix.
   - Advanced users can override the path by setting the `AI_TOOLKIT_PATH` environment variable.
