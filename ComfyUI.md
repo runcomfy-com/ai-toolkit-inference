@@ -246,7 +246,6 @@ Minimal example workflows are provided in `example_workflows/`:
 
 - `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 standard video generation (single node)
 - `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (3-node workflow: GenerateLatent → LatentUpscale → Denoise)
-- `example_workflows/rc_ltx23_upscale_minimal.json` - LTX-2.3 upscale at smaller input resolution (3-node workflow)
 
 **Latent workflow examples** (upscale + second pass):
 
