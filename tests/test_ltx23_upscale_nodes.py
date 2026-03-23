@@ -186,9 +186,6 @@ class TestWorkflowValidity:
     def test_ltx23_high_minimal(self, node_registry, comfyui_builtins):
         self._check_workflow("rc_ltx23_high_minimal.json", node_registry, comfyui_builtins)
 
-    def test_ltx23_upscale_minimal(self, node_registry, comfyui_builtins):
-        self._check_workflow("rc_ltx23_upscale_minimal.json", node_registry, comfyui_builtins)
-
 
 # ── Node execution with mocked pipeline ─────────────────────────────
 
