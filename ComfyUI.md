@@ -94,8 +94,7 @@ Some nodes require an `IMAGE` input as a control/reference image:
 Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 
 - `RCLTX2`
-- `RCLTX23` — supports `resolution` dropdown: `Default` (standard) or `High` (2x spatial upscale via latent upsampler)
-- `RCLTX23Upscale` — dedicated 2x upscale node (always runs 3-stage High mode). Output is 2x the input width/height.
+- `RCLTX23` — standard single-pass LTX-2.3 video generation
 - `RCWan21T2V14B`, `RCWan21T2V1B`
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
@@ -161,6 +160,26 @@ RCAITKLoadPipeline → RCAITKEmptyLatent → RCAITKSampler (1st pass)
 
 See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
 
+#### LTX-2.3 Composable Upscale Workflow (3-node pattern)
+
+For 2x spatial upscale with LTX-2.3, use the 3-node pattern matching the community standard (Lightricks ComfyUI-LTXVideo):
+
+```
+RCAITKLoadPipeline (ltx2.3) ─┬─→ RCLTX23GenerateLatent (Stage 1: generate at input resolution)
+                              │         ↓ LTX23_LATENT
+                              ├─→ RCLTX23LatentUpscale  (Stage 2: 2x spatial upsample)
+                              │         ↓ LTX23_LATENT
+                              └─→ RCLTX23Denoise        (Stage 3: denoise with distilled LoRA)
+                                        ↓ IMAGE
+                                   SaveImage
+```
+
+- **Stage 1** (`RCLTX23GenerateLatent`): Full generation with configurable prompt, steps, cfg, seed. Outputs raw video + audio latents.
+- **Stage 2** (`RCLTX23LatentUpscale`): 2x spatial upsample in latent space. No configurable parameters — just connect and go.
+- **Stage 3** (`RCLTX23Denoise`): Refine upscaled latents with distilled LoRA. Configurable `steps` (default 3) and `noise_scale` (default 0.909375). Outputs decoded video frames (IMAGE).
+
+See `example_workflows/rc_ltx23_high_minimal.json` for a complete example.
+
 ## Available nodes (class types)
 
 - Z-Image:
@@ -193,7 +212,6 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
 - Video:
   - `RCLTX2`
   - `RCLTX23`
-  - `RCLTX23Upscale`
   - `RCWan21T2V14B`
   - `RCWan21T2V1B`
   - `RCWan21I2V14B`
@@ -208,6 +226,10 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
   - `RCAITKSampler`
   - `RCAITKDecodeLatent`
   - `RCAITKEncodeImage`
+- LTX-2.3 Composable Upscale (3-node pattern):
+  - `RCLTX23GenerateLatent` — Stage 1: generate video latent at given resolution
+  - `RCLTX23LatentUpscale` — Stage 2: 2x spatial latent upsample
+  - `RCLTX23Denoise` — Stage 3: denoise with distilled LoRA, output decoded frames
 
 ## Example workflows
 
@@ -220,11 +242,11 @@ Minimal example workflows are provided in `example_workflows/`:
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.
 
-**LTX-2.3 examples** (with resolution modes):
+**LTX-2.3 examples**:
 
-- `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 video generation (Default resolution)
-- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (High resolution via dropdown)
-- `example_workflows/rc_ltx23_upscale_minimal.json` - LTX-2.3 dedicated upscale node (always 2x)
+- `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 standard video generation (single node)
+- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (3-node workflow: GenerateLatent → LatentUpscale → Denoise)
+- `example_workflows/rc_ltx23_upscale_minimal.json` - LTX-2.3 upscale at smaller input resolution (3-node workflow)
 
 **Latent workflow examples** (upscale + second pass):
 
