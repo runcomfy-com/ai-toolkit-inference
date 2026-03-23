@@ -599,6 +599,28 @@ class RCLTX23(_RCAitkBase):
         return LTX23Pipeline
 
 
+class RCLTX23Upscale(RCLTX23):
+    """LTX-2.3 with 2x spatial upscale (always High mode).
+
+    Same as RCLTX23 but always runs the 3-stage upscale workflow:
+      Stage 1: Generate at input resolution
+      Stage 2: 2x latent upsample
+      Stage 3: Denoise with distilled LoRA (3 steps)
+    Output is 2x the input width/height.
+    """
+
+    DISPLAY_NAME = "RC LTX-2.3 Upscale (2x)"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Use grandparent's INPUT_TYPES (skip RCLTX23's resolution dropdown)
+        return _RCAitkBase.INPUT_TYPES.__func__(cls)
+
+    def generate(self, prompt, width, height, sample_steps, guidance_scale, seed, **kwargs):
+        kwargs["resolution"] = "High"
+        return super().generate(prompt, width, height, sample_steps, guidance_scale, seed, **kwargs)
+
+
 # ===== Wan 2.1 =====
 
 class RCWan21T2V14B(_RCAitkBase):

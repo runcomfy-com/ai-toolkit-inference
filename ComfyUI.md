@@ -95,6 +95,7 @@ Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 
 - `RCLTX2`
 - `RCLTX23` — supports `resolution` dropdown: `Default` (standard) or `High` (2x spatial upscale via latent upsampler)
+- `RCLTX23Upscale` — dedicated 2x upscale node (always runs 3-stage High mode). Output is 2x the input width/height.
 - `RCWan21T2V14B`, `RCWan21T2V1B`
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
@@ -192,6 +193,7 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
 - Video:
   - `RCLTX2`
   - `RCLTX23`
+  - `RCLTX23Upscale`
   - `RCWan21T2V14B`
   - `RCWan21T2V1B`
   - `RCWan21I2V14B`
@@ -221,7 +223,8 @@ Minimal example workflows are provided in `example_workflows/`:
 **LTX-2.3 examples** (with resolution modes):
 
 - `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 video generation (Default resolution)
-- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (High resolution)
+- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (High resolution via dropdown)
+- `example_workflows/rc_ltx23_upscale_minimal.json` - LTX-2.3 dedicated upscale node (always 2x)
 
 **Latent workflow examples** (upscale + second pass):
 
