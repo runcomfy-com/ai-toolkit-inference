@@ -24,7 +24,6 @@ from .rc_models import (
     RCOmniGen2,
     RCLTX2,
     RCLTX23,
-    RCLTX23Upscale,
     RCWan21T2V14B,
     RCWan21T2V1B,
     RCWan21I2V14B,
@@ -43,6 +42,9 @@ from .rc_latent_workflow import (
     RCAITKDecodeLatent,
     RCAITKEncodeImage,
     RCAITKGenerate,
+    RCLTX23GenerateLatent,
+    RCLTX23LatentUpscale,
+    RCLTX23Denoise,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -83,7 +85,6 @@ NODE_CLASS_MAPPINGS = {
     # Video models
     "RCLTX2": RCLTX2,
     "RCLTX23": RCLTX23,
-    "RCLTX23Upscale": RCLTX23Upscale,
     "RCWan21T2V14B": RCWan21T2V14B,
     "RCWan21T2V1B": RCWan21T2V1B,
     "RCWan21I2V14B": RCWan21I2V14B,
@@ -100,6 +101,11 @@ NODE_CLASS_MAPPINGS = {
     "RCAITKDecodeLatent": RCAITKDecodeLatent,
     "RCAITKEncodeImage": RCAITKEncodeImage,
     "RCAITKGenerate": RCAITKGenerate,
+
+    # LTX-2.3 composable upscale workflow (3-node pattern)
+    "RCLTX23GenerateLatent": RCLTX23GenerateLatent,
+    "RCLTX23LatentUpscale": RCLTX23LatentUpscale,
+    "RCLTX23Denoise": RCLTX23Denoise,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -133,7 +139,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
     "RCLTX2": "RC LTX-2",
     "RCLTX23": "RC LTX-2.3",
-    "RCLTX23Upscale": "RC LTX-2.3 Upscale (2x)",
     "RCWan21T2V14B": "RC Wan 2.1 T2V 14B",
     "RCWan21T2V1B": "RC Wan 2.1 T2V 1B",
     "RCWan21I2V14B": "RC Wan 2.1 I2V 14B",
@@ -150,6 +155,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCAITKDecodeLatent": "RC AITK Decode Latent",
     "RCAITKEncodeImage": "RC AITK Encode Image",
     "RCAITKGenerate": "RC AITK Generate",
+
+    # LTX-2.3 composable upscale workflow
+    "RCLTX23GenerateLatent": "RC LTX-2.3 Generate Latent",
+    "RCLTX23LatentUpscale": "RC LTX-2.3 Latent Upscale (2x)",
+    "RCLTX23Denoise": "RC LTX-2.3 Denoise",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

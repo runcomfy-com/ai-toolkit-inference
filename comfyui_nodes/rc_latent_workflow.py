@@ -679,3 +679,229 @@ class RCAITKGenerate:
             return (pil_frames_to_comfy_images(frames),)
 
         raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")
+
+
+# ===== LTX-2.3 Composable Upscale Workflow (3-node pattern) =====
+#
+# Community-standard 3-stage workflow for LTX-2.3 spatial upscale:
+#   GenerateLatent → LatentUpscale → Denoise
+#
+# Wire type: LTX23_LATENT (dict with video_latents, audio_latents, metadata)
+
+
+class RCLTX23GenerateLatent:
+    """Stage 1: Generate LTX-2.3 video at given resolution, output raw latent.
+
+    This is the first node in the 3-stage upscale workflow.
+    Connect the output to RCLTX23LatentUpscale for 2x spatial upscale.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("AITK_PIPELINE",),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "width": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32}),
+                "steps": ("INT", {"default": 25, "min": 1, "max": 150}),
+                "cfg": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 20.0, "step": 0.1}),
+                "seed": ("INT", {"default": 42, "min": -1, "max": 0x7FFFFFFF}),
+            },
+            "optional": {
+                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "control_image": ("IMAGE",),
+                "num_frames": ("INT", {"default": 41, "min": 1, "max": 201}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+            },
+        }
+
+    RETURN_TYPES = ("LTX23_LATENT",)
+    RETURN_NAMES = ("ltx_latent",)
+    FUNCTION = "generate"
+    CATEGORY = WORKFLOW_CATEGORY
+
+    def generate(
+        self,
+        pipe,
+        prompt: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg: float,
+        seed: int,
+        negative_prompt: str = "",
+        control_image=None,
+        num_frames: int = 41,
+        fps: int = 24,
+    ):
+        if not hasattr(pipe, "generate_latent"):
+            raise ValueError(
+                "RCLTX23GenerateLatent requires an LTX-2.3 pipeline. "
+                "Use RCAITKLoadPipeline with pipeline='ltx2.3'."
+            )
+
+        import torch as _torch
+
+        if seed < 0:
+            seed = _torch.randint(0, 2147483647, (1,)).item()
+        generator = _torch.Generator(device="cpu").manual_seed(int(seed))
+
+        ctrl_img = None
+        if control_image is not None:
+            ctrl_img = comfy_to_pil_image(control_image)
+
+        from src.pipelines.comfy_callbacks import comfy_pipeline_observer
+
+        with comfy_pipeline_observer(int(steps)):
+            result = pipe.generate_latent(
+                prompt=prompt,
+                negative_prompt=negative_prompt or "",
+                width=int(width),
+                height=int(height),
+                num_inference_steps=int(steps),
+                guidance_scale=float(cfg),
+                generator=generator,
+                control_image=ctrl_img,
+                num_frames=int(num_frames),
+                fps=int(fps),
+            )
+
+        return (result,)
+
+
+class RCLTX23LatentUpscale:
+    """Stage 2: 2x spatial upsample of LTX-2.3 video latent.
+
+    Takes LTX23_LATENT from GenerateLatent, outputs upscaled LTX23_LATENT.
+    Connect the output to RCLTX23Denoise.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("AITK_PIPELINE",),
+                "ltx_latent": ("LTX23_LATENT",),
+            },
+        }
+
+    RETURN_TYPES = ("LTX23_LATENT",)
+    RETURN_NAMES = ("ltx_latent",)
+    FUNCTION = "upscale"
+    CATEGORY = WORKFLOW_CATEGORY
+
+    def upscale(self, pipe, ltx_latent):
+        if not hasattr(pipe, "latent_upscale"):
+            raise ValueError(
+                "RCLTX23LatentUpscale requires an LTX-2.3 pipeline. "
+                "Use RCAITKLoadPipeline with pipeline='ltx2.3'."
+            )
+
+        video_latents = ltx_latent["video_latents"]
+        upscaled = pipe.latent_upscale(video_latents)
+
+        # Return updated dict with upscaled latents and doubled dimensions
+        return ({
+            **ltx_latent,
+            "video_latents": upscaled,
+            "width": ltx_latent["width"] * 2,
+            "height": ltx_latent["height"] * 2,
+        },)
+
+
+class RCLTX23Denoise:
+    """Stage 3: Denoise upscaled LTX-2.3 latent with distilled LoRA.
+
+    Takes upscaled LTX23_LATENT from LatentUpscale, outputs decoded video frames.
+    This is the terminal node in the 3-stage workflow.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pipe": ("AITK_PIPELINE",),
+                "ltx_latent": ("LTX23_LATENT",),
+            },
+            "optional": {
+                "steps": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 50,
+                        "tooltip": "Denoise steps (default 3 for distilled LoRA)",
+                    },
+                ),
+                "noise_scale": (
+                    "FLOAT",
+                    {
+                        "default": 0.909375,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.001,
+                        "tooltip": "Initial sigma / noise scale",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("frames",)
+    FUNCTION = "denoise"
+    CATEGORY = WORKFLOW_CATEGORY
+
+    def denoise(
+        self,
+        pipe,
+        ltx_latent,
+        steps: int = 3,
+        noise_scale: float = 0.909375,
+    ):
+        if not hasattr(pipe, "denoise_latent"):
+            raise ValueError(
+                "RCLTX23Denoise requires an LTX-2.3 pipeline. "
+                "Use RCAITKLoadPipeline with pipeline='ltx2.3'."
+            )
+
+        video_latents = ltx_latent["video_latents"]
+        audio_latents = ltx_latent["audio_latents"]
+        prompt = ltx_latent["prompt"]
+        negative_prompt = ltx_latent.get("negative_prompt", "")
+        width = ltx_latent["width"]
+        height = ltx_latent["height"]
+        num_frames = ltx_latent.get("num_frames", 41)
+        fps = ltx_latent.get("fps", 24)
+
+        # Build sigma schedule: evenly spaced from noise_scale to ~0 for given steps
+        sigma_values = None
+        if steps == 3 and abs(noise_scale - 0.909375) < 1e-6:
+            # Use official defaults
+            sigma_values = None
+        else:
+            # Generate evenly spaced sigmas from noise_scale down
+            import numpy as _np
+            sigma_values = list(_np.linspace(noise_scale, noise_scale / steps, steps))
+
+        from src.pipelines.comfy_callbacks import comfy_pipeline_observer
+
+        with comfy_pipeline_observer(int(steps)):
+            result = pipe.denoise_latent(
+                video_latents=video_latents,
+                audio_latents=audio_latents,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=int(width),
+                height=int(height),
+                num_frames=int(num_frames),
+                fps=int(fps),
+                num_inference_steps=int(steps),
+                sigma_values=sigma_values,
+            )
+
+        # Convert uint8 [T,H,W,C] tensor to ComfyUI float32 [B,H,W,C] in [0,1]
+        video_tensor = result["video_tensor"]
+        frames = video_tensor.float() / 255.0
+
+        return (frames,)
