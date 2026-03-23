@@ -124,8 +124,8 @@ For advanced workflows with latent manipulation (upscale + second pass, etc.), u
   - Outputs `AITK_LORA` to connect to `RCAITKLoadPipeline`
 
 - **`RCAITKLoadPipeline`** - Load a pipeline with optional LoRA
-  - Supports: SD 1.5, SDXL, Qwen Image, Qwen Image 2512
-  - Outputs `AITK_PIPELINE` for use with sampler/decode nodes
+  - Supports all pipelines (SD 1.5, SDXL, Qwen Image, FLUX, LTX-2.3, Wan, etc.)
+  - Outputs `AITK_PIPELINE` for use with sampler/decode/generate nodes
 
 - **`RCAITKEmptyLatent`** - Create an empty latent (like ComfyUI's EmptyLatentImage)
   - Inputs: `pipe`, `width`, `height`, `batch_size`
