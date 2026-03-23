@@ -14,7 +14,7 @@ ComfyUI-Manager will automatically:
    - Installs Python dependencies (`requirements-inference.txt`)
    - Clones `ostris/ai-toolkit` into `vendor/ai-toolkit` (required for extended models)
 
-After installation, restart ComfyUI. All nodes—including extended models like FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, and Wan 2.2—should work out of the box.
+After installation, restart ComfyUI. All nodes—including extended models like FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, LTX-2.3, and Wan 2.2—should work out of the box.
 
 ### Option 2: Symlink (for development)
 
@@ -94,6 +94,7 @@ Some nodes require an `IMAGE` input as a control/reference image:
 Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 
 - `RCLTX2`
+- `RCLTX23` — supports `resolution` dropdown: `Default` (standard) or `High` (2x spatial upscale via latent upsampler)
 - `RCWan21T2V14B`, `RCWan21T2V1B`
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
@@ -190,6 +191,7 @@ See `example_workflows/rc_aitk_sdxl_latent_upscale.json` for a complete example.
   - `RCOmniGen2`
 - Video:
   - `RCLTX2`
+  - `RCLTX23`
   - `RCWan21T2V14B`
   - `RCWan21T2V1B`
   - `RCWan21I2V14B`
@@ -216,6 +218,11 @@ Minimal example workflows are provided in `example_workflows/`:
 - `example_workflows/rc_sdxl_minimal.json`
 - ...and one `rc_<model>_minimal.json` for each node.
 
+**LTX-2.3 examples** (with resolution modes):
+
+- `example_workflows/rc_ltx23_minimal.json` - LTX-2.3 video generation (Default resolution)
+- `example_workflows/rc_ltx23_high_minimal.json` - LTX-2.3 with 2x spatial upscale (High resolution)
+
 **Latent workflow examples** (upscale + second pass):
 
 - `example_workflows/rc_aitk_sdxl_latent_upscale.json` - SDXL with latent upscale and 0.33 denoise refinement
@@ -234,7 +241,7 @@ Place that file in `ComfyUI/input/aitk_control.png` (or change the workflow to m
 
 ## Notes / common issues
 
-- **Extended models** (FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, Wan 2.2) require `ostris/ai-toolkit`.
+- **Extended models** (FLUX.2, Chroma, HiDream, OmniGen2, LTX-2, LTX-2.3, Wan 2.2) require `ostris/ai-toolkit`.
   - If you installed via **ComfyUI-Manager**, ai-toolkit is automatically cloned to `vendor/ai-toolkit`.
   - If you see `ImportError: ... from extensions_built_in...` or `from toolkit...`, ai-toolkit is missing. Run `python install.py` from the node pack folder to fix.
   - Advanced users can override the path by setting the `AI_TOOLKIT_PATH` environment variable.

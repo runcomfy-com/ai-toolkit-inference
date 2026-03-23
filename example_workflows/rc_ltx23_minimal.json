@@ -1,0 +1,34 @@
+{
+  "1": {
+    "inputs": {
+      "prompt": "a beautiful landscape, high quality, photorealistic",
+      "width": 768,
+      "height": 512,
+      "sample_steps": 25,
+      "guidance_scale": 4.0,
+      "seed": 42,
+      "offload_mode": "model",
+      "negative_prompt": "",
+      "num_frames": 41,
+      "fps": 24,
+      "resolution": "Default",
+      "lora_path": "",
+      "lora_scale": 1.0,
+      "hf_token": ""
+    },
+    "class_type": "RCLTX23",
+    "_meta": {
+      "title": "RC LTX-2.3 (Default)"
+    }
+  },
+  "2": {
+    "inputs": {
+      "filename_prefix": "rc_ltx23",
+      "images": ["1", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Frames"
+    }
+  }
+}
