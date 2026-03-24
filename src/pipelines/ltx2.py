@@ -52,6 +52,8 @@ class LTX2Pipeline(BasePipeline):
         enable_xformers=True,  # Enable xformers memory efficient attention
     )
 
+    LTX_VERSION = "2.0"
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._i2v_pipe = None  # Lazy-created for I2V mode
@@ -192,7 +194,7 @@ class LTX2Pipeline(BasePipeline):
                 convert_lora_original_to_diffusers,
             )
 
-            converted_sd = convert_lora_original_to_diffusers(lora_sd)
+            converted_sd = convert_lora_original_to_diffusers(lora_sd, version=self.LTX_VERSION)
         except ImportError:
             logger.warning("Could not import convert_lora_original_to_diffusers, using fallback")
             converted_sd = lora_sd
@@ -493,6 +495,8 @@ class LTX23Pipeline(LTX2Pipeline):
       Stage 3: Denoise upsampled latents with distilled LoRA (3 steps, guidance=1.0)
     Output is 2x the requested resolution.
     """
+
+    LTX_VERSION = "2.3"
 
     UPSAMPLER_REPO = "dg845/LTX-2.3-Spatial-Upsampler-Diffusers"
     DISTILLED_LORA_REPO = "CalamitousFelicitousness/LTX-2.3-distilled-lora-384-Diffusers"
