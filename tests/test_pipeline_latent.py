@@ -88,6 +88,86 @@ class TestPipelineLatentOutput:
         assert latents_param.default is None
 
 
+class TestQwenAttentionMasks:
+    """Tests for Qwen prompt attention-mask compatibility."""
+
+    def test_qwen_edit_reconstructs_missing_attention_masks(self):
+        """Qwen Image Edit should rebuild all-ones masks when diffusers returns None."""
+        from src.pipelines.qwen_image import QwenImageEditPipeline
+
+        pipe = QwenImageEditPipeline(device="cpu", offload_mode="none")
+        pipe._inject_diffusers_callback_kwargs = lambda *args, **kwargs: None
+        pipe._preprocess_ctrl_for_encode = lambda *args, **kwargs: torch.zeros((1, 3, 32, 32))
+
+        prompt_embeds = torch.randn(1, 4, 8)
+        negative_prompt_embeds = torch.randn(1, 3, 8)
+
+        mock_pipe = MagicMock()
+        mock_pipe.encode_prompt.side_effect = [
+            (prompt_embeds, None),
+            (negative_prompt_embeds, None),
+        ]
+        mock_pipe.return_value = Mock(images=[Image.new("RGB", (64, 64))])
+        pipe.pipe = mock_pipe
+
+        result = pipe._run_inference(
+            prompt="test",
+            negative_prompt="negative",
+            width=64,
+            height=64,
+            num_inference_steps=5,
+            guidance_scale=4.0,
+            generator=torch.Generator(device="cpu").manual_seed(42),
+            control_image=Image.new("RGB", (32, 32)),
+        )
+
+        assert result["image"].size == (64, 64)
+        kwargs = mock_pipe.call_args.kwargs
+        assert torch.equal(kwargs["prompt_embeds_mask"], torch.ones((1, 4), dtype=torch.int64))
+        assert torch.equal(
+            kwargs["negative_prompt_embeds_mask"],
+            torch.ones((1, 3), dtype=torch.int64),
+        )
+
+    def test_qwen_edit_plus_reconstructs_missing_attention_masks(self):
+        """Qwen Image Edit Plus should rebuild all-ones masks when diffusers returns None."""
+        from src.pipelines.qwen_image import QwenImageEditPlus2511Pipeline
+
+        pipe = QwenImageEditPlus2511Pipeline(device="cpu", offload_mode="none")
+        pipe._inject_diffusers_callback_kwargs = lambda *args, **kwargs: None
+        pipe._preprocess_ctrl_for_encode = lambda *args, **kwargs: torch.zeros((1, 3, 32, 32))
+
+        prompt_embeds = torch.randn(1, 5, 8)
+        negative_prompt_embeds = torch.randn(1, 2, 8)
+
+        mock_pipe = MagicMock()
+        mock_pipe.encode_prompt.side_effect = [
+            (prompt_embeds, None),
+            (negative_prompt_embeds, None),
+        ]
+        mock_pipe.return_value = Mock(images=[Image.new("RGB", (64, 64))])
+        pipe.pipe = mock_pipe
+
+        result = pipe._run_inference(
+            prompt="test",
+            negative_prompt="negative",
+            width=64,
+            height=64,
+            num_inference_steps=5,
+            guidance_scale=4.0,
+            generator=torch.Generator(device="cpu").manual_seed(42),
+            control_images=[Image.new("RGB", (32, 32))],
+        )
+
+        assert result["image"].size == (64, 64)
+        kwargs = mock_pipe.call_args.kwargs
+        assert torch.equal(kwargs["prompt_embeds_mask"], torch.ones((1, 5), dtype=torch.int64))
+        assert torch.equal(
+            kwargs["negative_prompt_embeds_mask"],
+            torch.ones((1, 2), dtype=torch.int64),
+        )
+
+
 class TestPipelineCacheKey:
     """Tests for pipeline cache key functionality."""
 
