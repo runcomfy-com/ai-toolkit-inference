@@ -44,6 +44,25 @@ def _get_condition_image_size():
     return _CONDITION_IMAGE_SIZE_CACHE
 
 
+def _ensure_attention_mask(
+    prompt_embeds: torch.Tensor, prompt_embeds_mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    """Normalize diffusers Qwen attention masks across versions.
+
+    diffusers >= 0.37 may optimize all-valid masks to `None`. Our wrappers pass
+    precomputed prompt embeddings into the generation pipeline, so we must
+    reconstruct the equivalent all-ones mask at that boundary.
+    """
+    if prompt_embeds_mask is not None:
+        return prompt_embeds_mask
+
+    return torch.ones(
+        prompt_embeds.shape[:2],
+        device=prompt_embeds.device,
+        dtype=torch.int64,
+    )
+
+
 
 class QwenImagePipeline(QwenLatentMixin, BasePipeline):
     """Qwen Image (DiT / flow-matching) pipeline wrapper.
@@ -575,6 +594,7 @@ class QwenImageEditPipeline(BasePipeline):
             device=device,
             num_images_per_prompt=1,
         )
+        prompt_embeds_mask = _ensure_attention_mask(prompt_embeds, prompt_embeds_mask)
 
         # Encode negative prompt with control image
         neg_prompt_embeds, neg_prompt_embeds_mask = self.pipe.encode_prompt(
@@ -582,6 +602,9 @@ class QwenImageEditPipeline(BasePipeline):
             image=ctrl_tensor,
             device=device,
             num_images_per_prompt=1,
+        )
+        neg_prompt_embeds_mask = _ensure_attention_mask(
+            neg_prompt_embeds, neg_prompt_embeds_mask
         )
 
         # Resize control image for generation
@@ -693,6 +716,7 @@ class QwenImageEditPlusPipeline(BasePipeline):
             device=device,
             num_images_per_prompt=1,
         )
+        prompt_embeds_mask = _ensure_attention_mask(prompt_embeds, prompt_embeds_mask)
 
         # Encode negative prompt
         neg_prompt_embeds, neg_prompt_embeds_mask = self.pipe.encode_prompt(
@@ -700,6 +724,9 @@ class QwenImageEditPlusPipeline(BasePipeline):
             image=ctrl_tensors,
             device=device,
             num_images_per_prompt=1,
+        )
+        neg_prompt_embeds_mask = _ensure_attention_mask(
+            neg_prompt_embeds, neg_prompt_embeds_mask
         )
 
         # Run inference with pre-encoded prompts
