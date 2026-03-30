@@ -1,5 +1,5 @@
 """
-RCLoRAApply — custom ComfyUI node to apply a second LoRA to an already-loaded AITK_PIPELINE.
+RCAITKLoRAApply — custom ComfyUI node to apply a second LoRA to an already-loaded AITK_PIPELINE.
 
 Deploy to RunComfy machine:
     /workspace/ComfyUI/custom_nodes/rc_lora_stacker/rc_lora_stacker.py
@@ -8,12 +8,15 @@ Deploy to RunComfy machine:
 Then restart ComfyUI.
 """
 
+from __future__ import annotations
+
 import os
 import hashlib
-import tempfile
 import requests
 import torch
 import safetensors.torch
+
+WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
 
 
 def _download_lora(url_or_path: str) -> str:
@@ -28,14 +31,14 @@ def _download_lora(url_or_path: str) -> str:
     os.makedirs("/tmp/lora_cache", exist_ok=True)
 
     if not os.path.exists(cache_path):
-        print(f"[RCLoRAApply] Downloading LoRA: {url_or_path}")
+        print(f"[RCAITKLoRAApply] Downloading LoRA: {url_or_path}")
         resp = requests.get(url_or_path, timeout=120)
         resp.raise_for_status()
         with open(cache_path, "wb") as f:
             f.write(resp.content)
-        print(f"[RCLoRAApply] Saved to {cache_path}")
+        print(f"[RCAITKLoRAApply] Saved to {cache_path}")
     else:
-        print(f"[RCLoRAApply] Using cached LoRA: {cache_path}")
+        print(f"[RCAITKLoRAApply] Using cached LoRA: {cache_path}")
 
     return cache_path
 
@@ -73,8 +76,8 @@ def _apply_lora(transformer, lora_path: str, scale: float):
     all_keys = list(cleaned.keys())
     lora_a_keys = [k for k in all_keys if ".lora_A.weight" in k]
     alpha_keys  = [k for k in all_keys if ".alpha" in k]
-    print(f"[RCLoRAApply] File: {os.path.basename(lora_path)}")
-    print(f"[RCLoRAApply] Total keys: {len(all_keys)}  lora_A pairs: {len(lora_a_keys)}  alpha tensors: {len(alpha_keys)}")
+    print(f"[RCAITKLoRAApply] File: {os.path.basename(lora_path)}")
+    print(f"[RCAITKLoRAApply] Total keys: {len(all_keys)}  lora_A pairs: {len(lora_a_keys)}  alpha tensors: {len(alpha_keys)}")
     if lora_a_keys:
         sample_key = lora_a_keys[0]
         sample_A = cleaned[sample_key]
@@ -82,10 +85,10 @@ def _apply_lora(transformer, lora_path: str, scale: float):
         alpha_k = sample_key.replace(".lora_A.weight", ".alpha")
         if alpha_k in cleaned:
             alpha_val = cleaned[alpha_k].item()
-            print(f"[RCLoRAApply] rank={rank}  alpha={alpha_val}  alpha/rank={alpha_val/rank:.4f}  effective_scale={scale * alpha_val / rank:.4f}")
+            print(f"[RCAITKLoRAApply] rank={rank}  alpha={alpha_val}  alpha/rank={alpha_val/rank:.4f}  effective_scale={scale * alpha_val / rank:.4f}")
         else:
-            print(f"[RCLoRAApply] rank={rank}  no alpha tensor found  effective_scale={scale:.4f}")
-        print(f"[RCLoRAApply] Sample key: {sample_key}  shape A={sample_A.shape}  B={cleaned[sample_key.replace('.lora_A.','.lora_B.')].shape}")
+            print(f"[RCAITKLoRAApply] rank={rank}  no alpha tensor found  effective_scale={scale:.4f}")
+        print(f"[RCAITKLoRAApply] Sample key: {sample_key}  shape A={sample_A.shape}  B={cleaned[sample_key.replace('.lora_A.','.lora_B.')].shape}")
 
     applied = 0
     skipped = 0
@@ -150,41 +153,41 @@ def _apply_lora(transformer, lora_path: str, scale: float):
             else:
                 skipped += 1
         except Exception as e:
-            print(f"[RCLoRAApply] Warning: could not apply {base_key}: {e}")
+            print(f"[RCAITKLoRAApply] Warning: could not apply {base_key}: {e}")
             skipped += 1
 
-    print(f"[RCLoRAApply] Applied {applied} LoRA layers, skipped {skipped}, scale={scale}")
+    print(f"[RCAITKLoRAApply] Applied {applied} LoRA layers, skipped {skipped}, scale={scale}")
     return applied
 
 
-class RCLoRAApply:
-    """
-    Apply a second LoRA to an already-loaded AITK_PIPELINE.
-    Connect: RCAITKLoadPipeline → RCLoRAApply → RCAITKGenerate
+class RCAITKLoRAApply:
+    """Apply a second LoRA to an already-loaded AITK_PIPELINE.
+
+    Connect: RCAITKLoadPipeline → RCAITKLoRAApply → RCAITKGenerate
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "pipe":          ("AITK_PIPELINE",),
-                "lora":          ("AITK_LORA",),
+                "pipe": ("AITK_PIPELINE",),
+                "lora": ("AITK_LORA",),
             }
         }
 
-    RETURN_TYPES  = ("AITK_PIPELINE",)
-    RETURN_NAMES  = ("pipe",)
-    FUNCTION      = "apply"
-    CATEGORY      = "RunComfy/AITK"
-    DESCRIPTION   = "Apply a second LoRA on top of an already-loaded AITK_PIPELINE."
+    RETURN_TYPES = ("AITK_PIPELINE",)
+    RETURN_NAMES = ("pipe",)
+    FUNCTION = "apply"
+    CATEGORY = WORKFLOW_CATEGORY
+    DESCRIPTION = "Apply a second LoRA on top of an already-loaded AITK_PIPELINE."
 
     def apply(self, pipe, lora: dict):
         url_or_path = (lora.get("lora_path_or_url") or "").strip()
-        name        = (lora.get("lora_name") or "").strip()
-        scale       = float(lora.get("lora_scale", 1.0))
+        name = (lora.get("lora_name") or "").strip()
+        scale = float(lora.get("lora_scale", 1.0))
 
         if not url_or_path and not name:
-            print("[RCLoRAApply] No LoRA specified, passing pipe through unchanged.")
+            print("[RCAITKLoRAApply] No LoRA specified, passing pipe through unchanged.")
             return (pipe,)
 
         # Resolve path
@@ -196,26 +199,28 @@ class RCLoRAApply:
                 import folder_paths
                 lora_path = folder_paths.get_full_path_or_raise("loras", name)
             except Exception as e:
-                raise ValueError(f"[RCLoRAApply] Cannot resolve LoRA '{name}': {e}")
+                raise ValueError(f"[RCAITKLoRAApply] Cannot resolve LoRA '{name}': {e}")
 
         transformer = _get_transformer(pipe)
         if transformer is None:
             raise RuntimeError(
-                "[RCLoRAApply] Could not find transformer in pipeline object. "
+                "[RCAITKLoRAApply] Could not find transformer in pipeline object. "
                 f"Pipeline type: {type(pipe)}. Attributes: {dir(pipe)}"
             )
-        print(f"[RCLoRAApply] Transformer type: {type(transformer).__name__}, "
-              f"device: {next(transformer.parameters()).device}, "
-              f"dtype: {next(transformer.parameters()).dtype}")
+        print(
+            f"[RCAITKLoRAApply] Transformer type: {type(transformer).__name__}, "
+            f"device: {next(transformer.parameters()).device}, "
+            f"dtype: {next(transformer.parameters()).dtype}"
+        )
 
         _apply_lora(transformer, lora_path, scale)
         return (pipe,)
 
 
 NODE_CLASS_MAPPINGS = {
-    "RCLoRAApply": RCLoRAApply,
+    "RCAITKLoRAApply": RCAITKLoRAApply,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RCLoRAApply": "Apply LoRA to Pipeline",
+    "RCAITKLoRAApply": "RC Apply LoRA to Pipeline",
 }
