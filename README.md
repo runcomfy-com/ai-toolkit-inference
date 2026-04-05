@@ -63,6 +63,7 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 | `v0.7.23.202602241` | `0.7.23`                        | [`de7d22c9becf5f3385348d9d5ff901536c340d0c`](https://github.com/ostris/ai-toolkit/commit/de7d22c9becf5f3385348d9d5ff901536c340d0c) |
 | `v0.7.24.202603201` | `0.7.24`                        | [`57d407cfd4e2ab884993fb5c7a6373d7e6785b51`](https://github.com/ostris/ai-toolkit/commit/57d407cfd4e2ab884993fb5c7a6373d7e6785b51) |
 | `v0.7.29.202603241` | `0.7.29`                        | [`4ad14d211a969c217bf5470213c04c6052d17592`](https://github.com/ostris/ai-toolkit/commit/4ad14d211a969c217bf5470213c04c6052d17592) |
+| `v0.7.29.202604051` | `0.7.29`                        | [`4ad14d211a969c217bf5470213c04c6052d17592`](https://github.com/ostris/ai-toolkit/commit/4ad14d211a969c217bf5470213c04c6052d17592) |
 
 ---
 
