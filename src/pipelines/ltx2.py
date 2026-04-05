@@ -140,7 +140,9 @@ class LTX2Pipeline(BasePipeline):
                 # Fuse mode: merge LoRA into base weights
                 t0 = time.perf_counter()
                 self.pipe.fuse_lora(adapter_names=["lora"], lora_scale=lora_scale)
-                self.pipe.unload_lora_weights()
+                # NOTE: Do NOT call unload_lora_weights() here.
+                # Adapter layers must be retained so unfuse_lora() can restore
+                # original weights when switching LoRA.
                 fuse_time = time.perf_counter() - t0
                 self._lora_fused = True
                 self._num_loras_fused = 1
@@ -229,14 +231,17 @@ class LTX2Pipeline(BasePipeline):
         merge_method = self.CONFIG.lora_merge_method
 
         if merge_method == LoraMergeMethod.FUSE:
-            # Fuse mode: need unfuse -> reload -> fuse(new_scale)
-            logger.info(f"Changing fused LoRA scale: unfuse -> reload -> fuse(scale={scale})")
+            # Fuse mode: unfuse -> re-fuse with new scale
+            # Adapters are still loaded (not unloaded after fuse), so we can
+            # directly unfuse and re-fuse without reloading the LoRA file.
+            logger.info(f"Changing fused LoRA scale: unfuse -> fuse(scale={scale})")
             try:
                 if self._lora_fused:
                     self.pipe.unfuse_lora()
                     self._lora_fused = False
-                # Reload with new scale (will fuse again)
-                self._load_lora(self._current_lora_paths, scale)
+                self.pipe.fuse_lora(adapter_names=["lora"], lora_scale=scale)
+                self._lora_fused = True
+                self._current_lora_scale = scale
                 return True
             except Exception as e:
                 logger.warning(f"Failed to change LoRA scale: {e}")
@@ -278,18 +283,37 @@ class LTX2Pipeline(BasePipeline):
         merge_method = self.CONFIG.lora_merge_method
 
         if merge_method == LoraMergeMethod.FUSE:
-            # Fuse mode: unfuse -> load -> fuse
+            # Fuse mode: unfuse -> hotswap -> fuse
             if self._lora_fused:
                 logger.info("Unfusing current LoRA before loading new one")
                 try:
                     self.pipe.unfuse_lora()
                     self._lora_fused = False
+                    self._num_loras_fused = 0
                 except Exception as e:
                     logger.warning(f"Failed to unfuse LoRA: {e}")
                     return False
-            # Load and fuse new LoRA
-            self._load_lora(lora_paths, lora_scale)
-            return True
+
+            # Try hotswap first (in-place adapter replacement, faster)
+            logger.info("Loading and fusing new LoRA (trying hotswap)")
+            try:
+                self._load_lora_hotswap(lora_paths, lora_scale)
+                # Hotswap only replaces adapter weights, now fuse them
+                self.pipe.fuse_lora(adapter_names=["lora"], lora_scale=lora_scale)
+                self._lora_fused = True
+                self._num_loras_fused = 1
+                self._current_lora_scale = lora_scale
+                return True
+            except Exception as e:
+                logger.warning(f"Hotswap failed: {e}, falling back to unload+load")
+                try:
+                    self.pipe.unload_lora_weights()
+                    self.lora_loaded = False
+                    self._load_lora(lora_paths, lora_scale)
+                    return True
+                except Exception as e2:
+                    logger.error(f"Fallback load also failed: {e2}")
+                    return False
         else:
             # SET_ADAPTERS mode: use hotswap for direct in-place replacement
             self._load_lora_hotswap(lora_paths, lora_scale)

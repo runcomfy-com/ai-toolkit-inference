@@ -494,8 +494,12 @@ class BasePipeline(ABC):
             # Fuse mode: merge LoRA weights into base model
             # Scale is set in fuse_lora, not dynamically changeable
             self.pipe.fuse_lora(adapter_names=["lora"], lora_scale=lora_scale)
-            # Unload PEFT adapters to free memory after fusion
-            self.pipe.unload_lora_weights()
+            # NOTE: Do NOT call unload_lora_weights() here.
+            # unload_lora_weights() removes the PEFT adapter layers entirely,
+            # which makes unfuse_lora() unable to restore original weights
+            # (it needs the adapter layers to compute the reverse merge).
+            # Keeping adapters loaded costs minimal extra memory since the
+            # weights are already fused into the base model.
             self._lora_fused = True
             self._num_loras_fused = 1  # Track for unfuse reliability
         else:
@@ -569,28 +573,13 @@ class BasePipeline(ABC):
                     logger.warning("Cannot change scale for multiple fused LoRAs")
                     return False
 
-                logger.info(f"Changing fused LoRA scale: unfuse -> reload -> fuse(scale={scale})")
+                logger.info(f"Changing fused LoRA scale: unfuse -> fuse(scale={scale})")
                 self.pipe.unfuse_lora()
                 self._lora_fused = False
 
-                # Reload LoRA weights (they were unloaded after fuse)
-                first_lora = self._current_lora_paths[0]
-                if isinstance(first_lora, dict):
-                    lora_path = list(first_lora.values())[0]
-                else:
-                    lora_path = first_lora
-
-                lora_dir = os.path.dirname(lora_path)
-                lora_file = os.path.basename(lora_path)
-                self.pipe.load_lora_weights(
-                    lora_dir,
-                    weight_name=lora_file,
-                    adapter_name="lora",
-                    local_files_only=True,
-                )
-                # Fuse with new scale
+                # Adapters are still loaded (we no longer unload after fuse),
+                # so we can directly re-fuse with the new scale.
                 self.pipe.fuse_lora(adapter_names=["lora"], lora_scale=scale)
-                self.pipe.unload_lora_weights()
                 self._lora_fused = True
             else:
                 # SET_ADAPTERS mode: direct scale change via PEFT API
@@ -672,7 +661,10 @@ class BasePipeline(ABC):
 
     def _switch_lora_fuse_mode(self, lora_paths: list, lora_scale: float = 1.0) -> bool:
         """
-        Switch LoRA using unfuse -> load -> fuse.
+        Switch LoRA in FUSE mode: unfuse -> hotswap -> fuse.
+
+        Uses hotswap (in-place adapter replacement) when possible for speed.
+        Falls back to unload+load if hotswap fails (e.g., rank mismatch).
 
         Note: unfuse_lora() only works reliably when single LoRA was fused.
         Multiple fused LoRAs require full model reload.
@@ -695,9 +687,27 @@ class BasePipeline(ABC):
                 logger.warning(f"Failed to unfuse LoRA: {e}, may need full reload")
                 return False
 
-        # Load and fuse new LoRA
+        # Load and fuse new LoRA.
+        # Use hotswap (in-place adapter replacement) when an adapter is already
+        # loaded — it's faster because it reuses the existing PEFT layer structure.
+        # Skip hotswap when no adapter loaded yet (hotswap requires existing adapter).
+        # Note: if the LoRA contains text-encoder weights, diffusers will reject
+        # hotswap and we fall back to unload+load automatically.
+        use_hotswap = self.lora_loaded
+        if use_hotswap:
+            logger.info("Loading and fusing new LoRA (hotswap)")
+            try:
+                self._load_lora(lora_paths, lora_scale, hotswap=True)
+                return True
+            except Exception as e:
+                logger.warning(f"Hotswap failed: {e}, falling back to unload+load")
+
+        # Standard path: unload old adapter (if any), then load new one
         logger.info("Loading and fusing new LoRA")
         try:
+            if self.lora_loaded:
+                self.pipe.unload_lora_weights()
+                self.lora_loaded = False
             self._load_lora(lora_paths, lora_scale, hotswap=False)
             return True
         except Exception as e:
