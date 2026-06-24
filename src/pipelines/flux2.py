@@ -6,20 +6,48 @@ This version adds minimal changes for LoRA switching while keeping
 the exact same inference behavior as the original.
 """
 
-import os
-import sys
 import gc
 import logging
-from typing import Dict, Any, Optional
+import os
+import sys
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Optional
 
 import torch
 from PIL import Image
 
-from .base import BasePipeline, PipelineConfig, LoraMergeMethod
-from ..schemas.models import ModelType
 from ..config import settings
+from ..schemas.models import ModelType
+from .base import BasePipeline, LoraMergeMethod, PipelineConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_file_info(path: Optional[str]) -> str:
+    """Return non-secret file diagnostics for logs."""
+    if not path:
+        return "path=<none>"
+    try:
+        stat = os.stat(path)
+        return f"path={path} exists=True size_bytes={stat.st_size}"
+    except FileNotFoundError:
+        return f"path={path} exists=False"
+    except OSError as exc:
+        return f"path={path} stat_error={type(exc).__name__}: {exc}"
+
+
+@contextmanager
+def _timed_step(name: str):
+    start = time.perf_counter()
+    logger.info(f"[FLUX2_LOAD] {name} START")
+    try:
+        yield
+    except Exception:
+        logger.exception(f"[FLUX2_LOAD] {name} FAILED after {time.perf_counter() - start:.3f}s")
+        raise
+    else:
+        logger.info(f"[FLUX2_LOAD] {name} END elapsed={time.perf_counter() - start:.3f}s")
 
 # Environment variable to enable aggressive memory cleanup (default: off for faster iterative runs)
 AITK_AGGRESSIVE_CLEANUP = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
@@ -112,10 +140,13 @@ class Flux2Pipeline(BasePipeline):
 
     def _load_pipeline(self):
         """Load FLUX.2 pipeline using ai-toolkit components."""
-        import time
-
+        total_start = time.perf_counter()
         logger.info(
-            f">>> _load_pipeline() START: self._lora_path={self._lora_path}, self._lora_scale={self._lora_scale}"
+            f">>> _load_pipeline() START: self._lora_path={self._lora_path}, "
+            f"self._lora_scale={self._lora_scale}, device={self.device}, dtype={self.dtype}, "
+            f"base_model={self.CONFIG.base_model}, transformer_file={self.TRANSFORMER_FILENAME}, "
+            f"text_encoder={self.TEXT_ENCODER_REPO}, text_encoder_type={self.TEXT_ENCODER_TYPE}, "
+            f"vae_repo={self.VAE_REPO or self.CONFIG.base_model}, hf_token_present={bool(self.hf_token)}"
         )
 
         # Reset timings
@@ -123,49 +154,70 @@ class Flux2Pipeline(BasePipeline):
 
         # Add ai-toolkit to path (configurable via AI_TOOLKIT_PATH env var)
         ai_toolkit_path = settings.ai_toolkit_path
+        logger.info(
+            f"[FLUX2_LOAD] ai_toolkit_path={ai_toolkit_path} "
+            f"exists={os.path.exists(ai_toolkit_path)} in_sys_path={ai_toolkit_path in sys.path}"
+        )
         if os.path.exists(ai_toolkit_path) and ai_toolkit_path not in sys.path:
             sys.path.insert(0, ai_toolkit_path)
+            logger.info("[FLUX2_LOAD] inserted ai_toolkit_path into sys.path")
 
         try:
-            from safetensors.torch import load_file
-            import huggingface_hub
+            with _timed_step("import_dependencies"):
+                import huggingface_hub
+                from safetensors.torch import load_file
 
-            # Try to import ai-toolkit components
-            try:
-                from extensions_built_in.diffusion_models.flux2.src.pipeline import Flux2Pipeline as AITKFlux2Pipeline
-                from extensions_built_in.diffusion_models.flux2.src.model import Flux2
-                from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams
-                from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
-                from toolkit.util.quantize import quantize, get_qtype
-                from optimum.quanto import freeze
-            except ImportError:
-                raise ImportError(
-                    f"FLUX.2 requires ai-toolkit. Please ensure AI_TOOLKIT_PATH ({ai_toolkit_path}) is valid."
-                )
+                # Try to import ai-toolkit components
+                try:
+                    from extensions_built_in.diffusion_models.flux2.src.autoencoder import (
+                        AutoEncoder,
+                        AutoEncoderParams,
+                    )
+                    from extensions_built_in.diffusion_models.flux2.src.model import Flux2
+                    from extensions_built_in.diffusion_models.flux2.src.pipeline import (
+                        Flux2Pipeline as AITKFlux2Pipeline,
+                    )
+                    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+                except ImportError:
+                    raise ImportError(
+                        f"FLUX.2 requires ai-toolkit. Please ensure AI_TOOLKIT_PATH ({ai_toolkit_path}) is valid."
+                    )
 
             # Clear GPU memory before loading
-            _maybe_cleanup()
+            with _timed_step("pre_load_cleanup"):
+                _maybe_cleanup()
 
             base_model_path = self.CONFIG.base_model
 
             # 1. Load Transformer
             t_start = time.perf_counter()
             logger.info("Loading FLUX.2 Transformer")
-            with torch.device("meta"):
-                transformer = Flux2(self._get_flux2_params())
+            with _timed_step("transformer_init_meta"):
+                with torch.device("meta"):
+                    transformer = Flux2(self._get_flux2_params())
 
             # Download transformer weights
             transformer_filename = self.TRANSFORMER_FILENAME
-            transformer_path = huggingface_hub.hf_hub_download(
-                repo_id=base_model_path,
-                filename=transformer_filename,
-                token=self.hf_token,
-            )
+            with _timed_step("transformer_hf_hub_download"):
+                logger.info(
+                    f"[FLUX2_LOAD] transformer_hf_hub_download repo_id={base_model_path} "
+                    f"filename={transformer_filename} token_present={bool(self.hf_token)}"
+                )
+                transformer_path = huggingface_hub.hf_hub_download(
+                    repo_id=base_model_path,
+                    filename=transformer_filename,
+                    token=self.hf_token,
+                )
+                logger.info(f"[FLUX2_LOAD] transformer_file {_safe_file_info(transformer_path)}")
 
-            state_dict = load_file(transformer_path, device="cpu")
-            for key in state_dict:
-                state_dict[key] = state_dict[key].to(self.dtype)
-            transformer.load_state_dict(state_dict, assign=True)
+            with _timed_step("transformer_safetensors_load_cpu"):
+                state_dict = load_file(transformer_path, device="cpu")
+                logger.info(f"[FLUX2_LOAD] transformer_state_dict_keys={len(state_dict)}")
+            with _timed_step("transformer_cast_dtype"):
+                for key in state_dict:
+                    state_dict[key] = state_dict[key].to(self.dtype)
+            with _timed_step("transformer_load_state_dict"):
+                transformer.load_state_dict(state_dict, assign=True)
             self.timings["load_transformer"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_transformer: {self.timings['load_transformer']:.3f}s")
 
@@ -190,8 +242,9 @@ class Flux2Pipeline(BasePipeline):
                 f"LoRA check: lora_path={self._lora_path}, exists={os.path.exists(self._lora_path) if self._lora_path else 'N/A'}"
             )
             if self._lora_path and os.path.exists(self._lora_path):
-                logger.info(f"Loading and merging LoRA: {self._lora_path} with scale={self._lora_scale}")
-                self._merge_adapter_to_transformer(transformer, self._lora_path, self._lora_scale)
+                logger.info(f"Loading and merging LoRA: {_safe_file_info(self._lora_path)} with scale={self._lora_scale}")
+                with _timed_step("lora_merge_total"):
+                    self._merge_adapter_to_transformer(transformer, self._lora_path, self._lora_scale)
             elif self._lora_path:
                 logger.error(f"LoRA file not found: {self._lora_path}")
             else:
@@ -200,39 +253,54 @@ class Flux2Pipeline(BasePipeline):
             logger.info(f"[TIMING] merge_lora: {self.timings['merge_lora']:.3f}s")
 
             t_start = time.perf_counter()
-            transformer.to(self.device, dtype=self.dtype)
-            transformer.eval()
+            with _timed_step("transformer_to_device"):
+                transformer.to(self.device, dtype=self.dtype)
+                transformer.eval()
             self.timings["transformer_to_gpu"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] transformer_to_gpu: {self.timings['transformer_to_gpu']:.3f}s")
 
             # Clear memory after transformer load
-            _maybe_cleanup()
+            with _timed_step("post_transformer_cleanup"):
+                _maybe_cleanup()
 
             # 3. Load VAE
             t_start = time.perf_counter()
             logger.info("Loading FLUX.2 VAE")
-            with torch.device("meta"):
-                vae = AutoEncoder(AutoEncoderParams())
+            with _timed_step("vae_init_meta"):
+                with torch.device("meta"):
+                    vae = AutoEncoder(AutoEncoderParams())
 
             vae_filename = "ae.safetensors"
             vae_repo = self.VAE_REPO or base_model_path
-            vae_path = huggingface_hub.hf_hub_download(
-                repo_id=vae_repo,
-                filename=vae_filename,
-                token=self.hf_token,
-            )
+            with _timed_step("vae_hf_hub_download"):
+                logger.info(
+                    f"[FLUX2_LOAD] vae_hf_hub_download repo_id={vae_repo} "
+                    f"filename={vae_filename} token_present={bool(self.hf_token)}"
+                )
+                vae_path = huggingface_hub.hf_hub_download(
+                    repo_id=vae_repo,
+                    filename=vae_filename,
+                    token=self.hf_token,
+                )
+                logger.info(f"[FLUX2_LOAD] vae_file {_safe_file_info(vae_path)}")
 
-            vae_state_dict = load_file(vae_path, device="cpu")
-            for key in vae_state_dict:
-                vae_state_dict[key] = vae_state_dict[key].to(self.dtype)
-            vae.load_state_dict(vae_state_dict, assign=True)
-            vae.to(self.device, dtype=self.dtype)
-            vae.eval()
+            with _timed_step("vae_safetensors_load_cpu"):
+                vae_state_dict = load_file(vae_path, device="cpu")
+                logger.info(f"[FLUX2_LOAD] vae_state_dict_keys={len(vae_state_dict)}")
+            with _timed_step("vae_cast_dtype"):
+                for key in vae_state_dict:
+                    vae_state_dict[key] = vae_state_dict[key].to(self.dtype)
+            with _timed_step("vae_load_state_dict"):
+                vae.load_state_dict(vae_state_dict, assign=True)
+            with _timed_step("vae_to_device"):
+                vae.to(self.device, dtype=self.dtype)
+                vae.eval()
             self.timings["load_vae"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_vae: {self.timings['load_vae']:.3f}s")
 
             # Clear memory after VAE load
-            _maybe_cleanup()
+            with _timed_step("post_vae_cleanup"):
+                _maybe_cleanup()
 
             # 4. Load Text Encoder
             t_start = time.perf_counter()
@@ -240,20 +308,22 @@ class Flux2Pipeline(BasePipeline):
                 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
                 logger.info(f"Loading Mistral Text Encoder: {self.TEXT_ENCODER_REPO}")
-                text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    torch_dtype=self.dtype,
-                    token=self.hf_token,
-                )
+                with _timed_step("mistral_text_encoder_from_pretrained"):
+                    text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        torch_dtype=self.dtype,
+                        token=self.hf_token,
+                    )
             elif self.TEXT_ENCODER_TYPE == "qwen":
                 from transformers import Qwen3ForCausalLM
 
                 logger.info(f"Loading Qwen3 Text Encoder: {self.TEXT_ENCODER_REPO}")
-                text_encoder = Qwen3ForCausalLM.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    torch_dtype=self.dtype,
-                    token=self.hf_token,
-                )
+                with _timed_step("qwen_text_encoder_from_pretrained"):
+                    text_encoder = Qwen3ForCausalLM.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        torch_dtype=self.dtype,
+                        token=self.hf_token,
+                    )
             else:
                 raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
             self.timings["load_text_encoder"] = time.perf_counter() - t_start
@@ -267,8 +337,9 @@ class Flux2Pipeline(BasePipeline):
             # quantize(text_encoder, weights=qtype)
             # freeze(text_encoder)
 
-            text_encoder.to(self.device)
-            text_encoder.eval()
+            with _timed_step("text_encoder_to_device"):
+                text_encoder.to(self.device)
+                text_encoder.eval()
             self.timings["text_encoder"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] text_encoder: {self.timings['text_encoder']:.3f}s")
 
@@ -276,46 +347,51 @@ class Flux2Pipeline(BasePipeline):
             if self.TEXT_ENCODER_TYPE == "mistral":
                 from transformers import AutoProcessor
 
-                tokenizer = AutoProcessor.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    token=self.hf_token,
-                )
+                with _timed_step("mistral_tokenizer_from_pretrained"):
+                    tokenizer = AutoProcessor.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        token=self.hf_token,
+                    )
             elif self.TEXT_ENCODER_TYPE == "qwen":
                 from transformers import Qwen2Tokenizer
 
-                tokenizer = Qwen2Tokenizer.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    token=self.hf_token,
-                )
+                with _timed_step("qwen_tokenizer_from_pretrained"):
+                    tokenizer = Qwen2Tokenizer.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        token=self.hf_token,
+                    )
             else:
                 raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
 
             # 7. Create Scheduler
-            scheduler = CustomFlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER_CONFIG)
+            with _timed_step("scheduler_create"):
+                scheduler = CustomFlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER_CONFIG)
 
             # 8. Create Pipeline
             logger.info("Creating FLUX.2 Pipeline")
-            self.pipe = AITKFlux2Pipeline(
-                scheduler=scheduler,
-                vae=vae,
-                text_encoder=text_encoder,
-                tokenizer=tokenizer,
-                transformer=transformer,
-                text_encoder_type=self.TEXT_ENCODER_TYPE,
-                is_guidance_distilled=self.IS_GUIDANCE_DISTILLED,
-            )
+            with _timed_step("aitk_pipeline_create"):
+                self.pipe = AITKFlux2Pipeline(
+                    scheduler=scheduler,
+                    vae=vae,
+                    text_encoder=text_encoder,
+                    tokenizer=tokenizer,
+                    transformer=transformer,
+                    text_encoder_type=self.TEXT_ENCODER_TYPE,
+                    is_guidance_distilled=self.IS_GUIDANCE_DISTILLED,
+                )
 
             self.transformer = transformer
             self.vae = vae
             self.text_encoder = text_encoder
             self.tokenizer = tokenizer
 
-            _maybe_cleanup()
+            with _timed_step("post_pipeline_cleanup"):
+                _maybe_cleanup()
 
-            logger.info("FLUX.2 pipeline loaded successfully")
+            logger.info(f"FLUX.2 pipeline loaded successfully total_elapsed={time.perf_counter() - total_start:.3f}s timings={self.timings}")
 
         except Exception as e:
-            logger.error(f"Failed to load FLUX.2 pipeline: {e}")
+            logger.error(f"Failed to load FLUX.2 pipeline after {time.perf_counter() - total_start:.3f}s: {e}")
             raise
 
     def _merge_adapter_to_transformer(self, transformer, lora_path: str, lora_scale: float = 1.0):
@@ -343,23 +419,27 @@ class Flux2Pipeline(BasePipeline):
         logger.info(f"Adapter merge device: {param_device}")
         # TODO: If OOMs appear in smaller GPUs, consider chunked merge or reintroduce periodic cache clears behind a flag.
 
-        lora_state_dict = load_file(lora_path, device="cpu")
+        logger.info(f"Adapter file info: {_safe_file_info(lora_path)}")
+        with _timed_step("adapter_safetensors_load_cpu"):
+            lora_state_dict = load_file(lora_path, device="cpu")
         logger.info(f"Loaded adapter file with {len(lora_state_dict)} keys")
 
         lora_keys_sample = list(lora_state_dict.keys())[:5]
         logger.info(f"Sample adapter keys (before conversion): {lora_keys_sample}")
 
         # Remove diffusion_model. prefix
-        converted_sd = {}
-        for key, value in lora_state_dict.items():
-            new_key = key.replace("diffusion_model.", "")
-            converted_sd[new_key] = value.to(self.dtype)
+        with _timed_step("adapter_key_convert_and_cast"):
+            converted_sd = {}
+            for key, value in lora_state_dict.items():
+                new_key = key.replace("diffusion_model.", "")
+                converted_sd[new_key] = value.to(self.dtype)
 
         # Move tensors to merge device once (avoid per-layer CPU->GPU transfers)
         if param_device.type == "cuda":
-            for key, value in converted_sd.items():
-                if isinstance(value, torch.Tensor) and value.device.type != "cuda":
-                    converted_sd[key] = value.to(device=param_device, dtype=self.dtype, non_blocking=True)
+            with _timed_step("adapter_tensors_to_merge_device"):
+                for key, value in converted_sd.items():
+                    if isinstance(value, torch.Tensor) and value.device.type != "cuda":
+                        converted_sd[key] = value.to(device=param_device, dtype=self.dtype, non_blocking=True)
 
         converted_keys_sample = list(converted_sd.keys())[:5]
         logger.info(f"Sample adapter keys (after conversion): {converted_keys_sample}")
@@ -394,6 +474,7 @@ class Flux2Pipeline(BasePipeline):
         # Manual merge (GPU-friendly): W += scale * (B @ A)
         transformer_state = transformer.state_dict()
         merged_count = 0
+        merge_start = time.perf_counter()
         for key in list(converted_sd.keys()):
             if "lora_A.weight" in key:
                 base_key = key.replace(".lora_A.weight", "")
@@ -428,8 +509,12 @@ class Flux2Pipeline(BasePipeline):
                         merged_count += 1
 
 
-        transformer.load_state_dict(transformer_state, assign=True)
-        logger.info(f"Merged {merged_count} LoRA layers with scale={lora_scale}")
+        with _timed_step("adapter_load_merged_state_dict"):
+            transformer.load_state_dict(transformer_state, assign=True)
+        logger.info(
+            f"Merged {merged_count} LoRA layers with scale={lora_scale} "
+            f"in {time.perf_counter() - merge_start:.3f}s"
+        )
 
     def _merge_lokr_to_transformer(self, transformer, converted_sd, lora_scale: float = 1.0):
         """Merge LoKR (Low-Rank Kronecker product) adapter weights into transformer.
