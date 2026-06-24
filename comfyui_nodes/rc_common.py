@@ -172,6 +172,22 @@ def _get_pipeline_id(pipeline_ctor) -> str:
     return str(pipeline_ctor)
 
 
+def _safe_cache_key_summary(key: Optional["PipelineCacheKey"]) -> str:
+    """Summarize a pipeline cache key without logging token-bearing fields."""
+    if key is None:
+        return "<none>"
+    return (
+        "PipelineCacheKey("
+        f"model_id={key.model_id!r}, "
+        f"pipeline_id={key.pipeline_id!r}, "
+        f"offload_mode={key.offload_mode!r}, "
+        f"hf_token_present={bool(key.hf_token)}, "
+        f"lora_paths_key={key.lora_paths_key!r}, "
+        f"lora_scale_key={key.lora_scale_key!r}"
+        ")"
+    )
+
+
 _PIPELINE_CACHE: Dict[str, Any] = {
     "key": None,
     "instance": None,
@@ -232,7 +248,10 @@ def get_or_load_pipeline(
 
     if _PIPELINE_CACHE["instance"] is not None:
         unload_start = time.perf_counter()
-        logger.info(f"Pipeline cache miss; unloading previous pipeline key={_PIPELINE_CACHE['key']}")
+        logger.info(
+            "Pipeline cache miss; unloading previous pipeline "
+            f"key={_safe_cache_key_summary(_PIPELINE_CACHE['key'])}"
+        )
         try:
             _PIPELINE_CACHE["instance"].unload()
         except Exception:
