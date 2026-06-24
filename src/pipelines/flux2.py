@@ -73,6 +73,14 @@ AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
 # Hard-abort an HF download subprocess after this many seconds without progress.
 # Set to 0 to disable aborts while keeping progress logs.
 AITK_HF_STALL_ABORT_SECONDS = float(os.environ.get("AITK_HF_STALL_ABORT_SECONDS", "120"))
+# Hard-abort once the blob is fully downloaded but hf_hub_download still hasn't returned
+# (stuck verifying/moving into cache — the issue #23 100% hang). Larger than the stall
+# timeout because legitimate finalization of a multi-GB file takes time. 0 disables.
+AITK_HF_FINALIZE_ABORT_SECONDS = float(os.environ.get("AITK_HF_FINALIZE_ABORT_SECONDS", "300"))
+# Force the plain, single-stream HF downloader in the download subprocess by disabling
+# hf_transfer and xet. Their multithreaded backends are the usual cause of a download that
+# reaches 100% then hangs at finalize. On by default for reliability; set to 0 for speed.
+AITK_HF_ROBUST_DOWNLOAD = os.environ.get("AITK_HF_ROBUST_DOWNLOAD", "1").lower() not in ("0", "false", "no")
 
 
 def _maybe_cleanup() -> None:
@@ -108,7 +116,8 @@ def _watch_hf_download(
     """
     total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
     last_size, last_t, stalled = 0, time.perf_counter(), 0
-    finalize_logged = False
+    finalize_start: Optional[float] = None
+    last_finalize_log = 0.0
     while not stop_event.wait(interval):
         try:
             incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
@@ -124,17 +133,34 @@ def _watch_hf_download(
 
         # Bytes fully on disk but hf_hub_download hasn't returned: it's finalizing
         # (verifying / moving the blob into the cache), NOT a dropped connection. 0 MB/s here
-        # is expected, so never count it as a stall or abort — aborting would kill a complete
-        # download and a retry would just re-hang at the same finalize step (issue #23).
+        # is expected, so this is never a "stall". But it can hang indefinitely (issue #23),
+        # so abort after AITK_HF_FINALIZE_ABORT_SECONDS with an actionable error.
         if total_bytes and size >= total_bytes * 0.999:
             stalled = 0
-            if not finalize_logged:
+            if finalize_start is None:
+                finalize_start = now
+                last_finalize_log = now
                 log(
                     f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} "
                     f"bytes_complete={size / 1e9:.2f}GB/{total_str}; hf_hub_download is "
                     f"verifying/moving the file into the cache (not a network stall)"
                 )
-                finalize_logged = True
+            finalize_elapsed = now - finalize_start
+            if now - last_finalize_log >= 30:
+                log(f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} still finalizing ~{int(finalize_elapsed)}s")
+                last_finalize_log = now
+            if (
+                abort_event is not None
+                and AITK_HF_FINALIZE_ABORT_SECONDS > 0
+                and finalize_elapsed >= AITK_HF_FINALIZE_ABORT_SECONDS
+            ):
+                log(
+                    f"[FLUX2_LOAD] hf_download_FINALIZE_TIMEOUT repo_id={repo_id} "
+                    f"bytes complete but hf_hub_download did not return after ~{int(finalize_elapsed)}s "
+                    f"(AITK_HF_FINALIZE_ABORT_SECONDS={AITK_HF_FINALIZE_ABORT_SECONDS:g}); aborting. "
+                    f"Set a local base_model_path to load from disk, or keep AITK_HF_ROBUST_DOWNLOAD=1."
+                )
+                abort_event.set()
             last_size, last_t = size, now
             continue
 
@@ -212,6 +238,22 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
         watcher.join(timeout=interval + 1.0)
 
 
+def _hf_subprocess_env(repo_id: str, filename: str) -> Dict[str, str]:
+    """Build the child-process environment for an hf_hub_download subprocess.
+
+    When AITK_HF_ROBUST_DOWNLOAD is set, disable hf_transfer and xet so the child uses the
+    plain single-stream downloader. The child imports huggingface_hub fresh, so these env
+    vars actually take effect (unlike setting them in this already-imported process).
+    """
+    env = os.environ.copy()
+    env["AITK_HF_REPO_ID"] = repo_id
+    env["AITK_HF_FILENAME"] = filename
+    if AITK_HF_ROBUST_DOWNLOAD:
+        env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        env["HF_HUB_DISABLE_XET"] = "1"
+    return env
+
+
 def _run_hf_hub_download_subprocess(
     repo_id: str,
     filename: str,
@@ -244,9 +286,7 @@ except Exception as exc:
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 '''
-    env = os.environ.copy()
-    env["AITK_HF_REPO_ID"] = repo_id
-    env["AITK_HF_FILENAME"] = filename
+    env = _hf_subprocess_env(repo_id, filename)
 
     proc = subprocess.Popen(
         [sys.executable, "-c", child_code],
@@ -269,8 +309,9 @@ except Exception as exc:
                 proc.kill()
                 proc.wait(timeout=5)
             raise TimeoutError(
-                f"hf_hub_download for {repo_id}/{filename} made no progress for "
-                f"{AITK_HF_STALL_ABORT_SECONDS:g}s and was aborted; retry should resume from cache"
+                f"hf_hub_download for {repo_id}/{filename} was aborted by the progress watcher "
+                f"(no-progress or finalize timeout — see [FLUX2_LOAD] logs). Retry may resume from "
+                f"cache; if it recurs, set a local base_model_path or keep AITK_HF_ROBUST_DOWNLOAD=1."
             )
         time.sleep(0.25)
 

@@ -286,3 +286,53 @@ def test_hf_download_watcher_treats_full_size_as_finalizing_not_stall(tmp_path, 
     assert not any("hf_download_STALLED" in line for line in logs)
     assert not any("hf_download_ABORTING" in line for line in logs)
     assert any("hf_download_finalizing" in line for line in logs)
+
+
+def test_hf_download_watcher_finalize_timeout_aborts(tmp_path, monkeypatch):
+    """A finalize that never returns must still be aborted (with its own message)."""
+    from src.pipelines import flux2
+
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    total = 4096
+    (blobs / "abc.incomplete").write_bytes(b"x" * total)
+
+    monkeypatch.setattr(flux2, "AITK_HF_FINALIZE_ABORT_SECONDS", 0.02)
+
+    stop_event = threading.Event()
+    abort_event = threading.Event()
+    logs = []
+    watcher = threading.Thread(
+        target=flux2._watch_hf_download,
+        args=(stop_event, abort_event, str(blobs), "owner/repo", total, 0.01, logs.append),
+    )
+    watcher.start()
+    deadline = time.time() + 1
+    while time.time() < deadline and not abort_event.is_set():
+        time.sleep(0.01)
+    stop_event.set()
+    watcher.join(timeout=1)
+
+    assert abort_event.is_set()
+    assert any("hf_download_FINALIZE_TIMEOUT" in line for line in logs)
+    assert not any("hf_download_STALLED" in line for line in logs)
+
+
+def test_hf_subprocess_env_forces_robust_download(monkeypatch):
+    from src.pipelines import flux2
+
+    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", True)
+    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors")
+    assert env["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
+    assert env["HF_HUB_DISABLE_XET"] == "1"
+    assert env["AITK_HF_REPO_ID"] == "owner/repo"
+    assert env["AITK_HF_FILENAME"] == "model.safetensors"
+
+
+def test_hf_subprocess_env_can_keep_fast_download(monkeypatch):
+    from src.pipelines import flux2
+
+    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", False)
+    monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
+    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors")
+    assert "HF_HUB_ENABLE_HF_TRANSFER" not in env
