@@ -7,12 +7,14 @@ the exact same inference behavior as the original.
 """
 
 import gc
+import glob
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 from PIL import Image
@@ -55,6 +57,23 @@ AITK_AGGRESSIVE_CLEANUP = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() 
 # Default off to avoid duplicating RAM.
 AITK_FLUX2_HOTSWAP = os.environ.get("AITK_FLUX2_HOTSWAP", "").lower() in ("1", "true", "yes")
 
+# --- HF download observability (issue #23) -----------------------------------
+# hf_hub_download exposes no progress callback and its tqdm bar is swallowed in the
+# RunComfy/ComfyUI server context, so a frozen multi-GB download looks identical to a
+# slow one in our logs. We watch the on-disk *.incomplete blob from a side thread and
+# log throughput + a STALLED line so a hang is distinguishable from progress.
+AITK_HF_PROGRESS = os.environ.get("AITK_HF_PROGRESS", "1").lower() not in ("0", "false", "no")
+# Seconds between progress samples.
+AITK_HF_PROGRESS_INTERVAL = float(os.environ.get("AITK_HF_PROGRESS_INTERVAL", "5"))
+# Below this throughput a sample counts as "no progress"; N consecutive samples -> STALLED.
+AITK_HF_STALL_MB_PER_S = float(os.environ.get("AITK_HF_STALL_MB_PER_S", "0.5"))
+AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
+# Per-request read timeout for HF downloads. Default huggingface_hub is 10s; we raise it
+# a little but, crucially, keep it FINITE so a dropped connection raises+retries instead of
+# hanging forever with a growing .incomplete file (the issue #23 symptom). Must be set
+# before huggingface_hub is imported, hence setdefault at module import time.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", os.environ.get("AITK_HF_DOWNLOAD_TIMEOUT", "30"))
+
 
 def _maybe_cleanup() -> None:
     """Optionally run aggressive cleanup (gc + CUDA cache clear)."""
@@ -63,6 +82,98 @@ def _maybe_cleanup() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _hf_blobs_dir(cache_dir: str, repo_id: str) -> str:
+    """Path to the blobs/ dir where huggingface_hub streams *.incomplete files for a repo."""
+    return os.path.join(cache_dir, "models--" + repo_id.replace("/", "--"), "blobs")
+
+
+def _watch_hf_download(
+    stop_event: "threading.Event",
+    blobs_dir: str,
+    repo_id: str,
+    total_bytes: Optional[int],
+    interval: float,
+    log: Callable[[str], None],
+) -> None:
+    """Poll the largest *.incomplete blob and log throughput / stall until stop_event is set.
+
+    Best-effort and side-channel only: any error is swallowed so download watching can never
+    break the download itself.
+    """
+    total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
+    last_size, last_t, stalled = 0, time.perf_counter(), 0
+    while not stop_event.wait(interval):
+        try:
+            incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
+            if not incompletes:
+                continue
+            size = os.path.getsize(max(incompletes, key=os.path.getsize))
+        except OSError:
+            continue
+        now = time.perf_counter()
+        dt = now - last_t
+        speed = (size - last_size) / dt / 1e6 if dt > 0 else 0.0
+        pct = f"{size / total_bytes * 100:.1f}%" if total_bytes else "?%"
+        log(
+            f"[FLUX2_LOAD] hf_download_progress repo_id={repo_id} "
+            f"{size / 1e9:.2f}GB/{total_str} ({pct}) {speed:.1f}MB/s"
+        )
+        # Don't count the first sample as a stall (no prior baseline to compare against).
+        if last_size and speed < AITK_HF_STALL_MB_PER_S:
+            stalled += 1
+            if stalled >= AITK_HF_STALL_TICKS:
+                log(
+                    f"[FLUX2_LOAD] hf_download_STALLED repo_id={repo_id} "
+                    f"no_progress_for~{int(stalled * interval)}s at {size / 1e9:.2f}GB/{total_str} "
+                    f"(connection likely dropped; will raise after HF_HUB_DOWNLOAD_TIMEOUT)"
+                )
+        else:
+            stalled = 0
+        last_size, last_t = size, now
+
+
+@contextmanager
+def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], interval: float = AITK_HF_PROGRESS_INTERVAL):
+    """Log live progress for an hf_hub_download wrapped by this context manager.
+
+    No-op when AITK_HF_PROGRESS is disabled. Resolves the file's total size and the hub cache
+    location up front (both best-effort) so the watcher thread can report a percentage.
+    """
+    if not AITK_HF_PROGRESS:
+        yield
+        return
+
+    import huggingface_hub
+
+    total_bytes: Optional[int] = None
+    try:
+        meta = huggingface_hub.get_hf_file_metadata(
+            huggingface_hub.hf_hub_url(repo_id, filename), token=token
+        )
+        total_bytes = meta.size
+    except Exception as exc:  # network/auth/etc — degrade to no-percentage progress
+        logger.info(f"[FLUX2_LOAD] hf_download_progress size_lookup_failed {type(exc).__name__}: {exc}")
+
+    try:
+        cache_dir = huggingface_hub.constants.HF_HUB_CACHE
+    except Exception:
+        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+
+    stop_event = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_hf_download,
+        args=(stop_event, _hf_blobs_dir(cache_dir, repo_id), repo_id, total_bytes, interval, logger.info),
+        name=f"hf-dl-watch-{filename}",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        watcher.join(timeout=interval + 1.0)
 
 
 # Scheduler config from ai-toolkit
@@ -203,11 +314,12 @@ class Flux2Pipeline(BasePipeline):
                     f"[FLUX2_LOAD] transformer_hf_hub_download repo_id={base_model_path} "
                     f"filename={transformer_filename} token_present={bool(self.hf_token)}"
                 )
-                transformer_path = huggingface_hub.hf_hub_download(
-                    repo_id=base_model_path,
-                    filename=transformer_filename,
-                    token=self.hf_token,
-                )
+                with _hf_download_progress(base_model_path, transformer_filename, self.hf_token):
+                    transformer_path = huggingface_hub.hf_hub_download(
+                        repo_id=base_model_path,
+                        filename=transformer_filename,
+                        token=self.hf_token,
+                    )
                 logger.info(f"[FLUX2_LOAD] transformer_file {_safe_file_info(transformer_path)}")
 
             with _timed_step("transformer_safetensors_load_cpu"):
@@ -277,11 +389,12 @@ class Flux2Pipeline(BasePipeline):
                     f"[FLUX2_LOAD] vae_hf_hub_download repo_id={vae_repo} "
                     f"filename={vae_filename} token_present={bool(self.hf_token)}"
                 )
-                vae_path = huggingface_hub.hf_hub_download(
-                    repo_id=vae_repo,
-                    filename=vae_filename,
-                    token=self.hf_token,
-                )
+                with _hf_download_progress(vae_repo, vae_filename, self.hf_token):
+                    vae_path = huggingface_hub.hf_hub_download(
+                        repo_id=vae_repo,
+                        filename=vae_filename,
+                        token=self.hf_token,
+                    )
                 logger.info(f"[FLUX2_LOAD] vae_file {_safe_file_info(vae_path)}")
 
             with _timed_step("vae_safetensors_load_cpu"):
