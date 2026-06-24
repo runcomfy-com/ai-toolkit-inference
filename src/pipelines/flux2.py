@@ -68,11 +68,6 @@ AITK_HF_PROGRESS_INTERVAL = float(os.environ.get("AITK_HF_PROGRESS_INTERVAL", "5
 # Below this throughput a sample counts as "no progress"; N consecutive samples -> STALLED.
 AITK_HF_STALL_MB_PER_S = float(os.environ.get("AITK_HF_STALL_MB_PER_S", "0.5"))
 AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
-# Per-request read timeout for HF downloads. Default huggingface_hub is 10s; we raise it
-# a little but, crucially, keep it FINITE so a dropped connection raises+retries instead of
-# hanging forever with a growing .incomplete file (the issue #23 symptom). Must be set
-# before huggingface_hub is imported, hence setdefault at module import time.
-os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", os.environ.get("AITK_HF_DOWNLOAD_TIMEOUT", "30"))
 
 
 def _maybe_cleanup() -> None:
@@ -127,7 +122,7 @@ def _watch_hf_download(
                 log(
                     f"[FLUX2_LOAD] hf_download_STALLED repo_id={repo_id} "
                     f"no_progress_for~{int(stalled * interval)}s at {size / 1e9:.2f}GB/{total_str} "
-                    f"(connection likely dropped; will raise after HF_HUB_DOWNLOAD_TIMEOUT)"
+                    f"(connection likely dropped/throttled)"
                 )
         else:
             stalled = 0
