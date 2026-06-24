@@ -161,6 +161,7 @@ class PipelineCacheKey:
     pipeline_id: str  # e.g. "module:ClassName" to distinguish different pipeline classes
     offload_mode: OffloadMode  # CPU offload strategy (none/model/sequential)
     hf_token: Optional[str]
+    base_model_path: Optional[str]  # local model dir override (None = default HF repo)
     lora_paths_key: Tuple
     lora_scale_key: Union[float, Tuple[Tuple[str, float], ...]]
 
@@ -182,6 +183,7 @@ def _safe_cache_key_summary(key: Optional["PipelineCacheKey"]) -> str:
         f"pipeline_id={key.pipeline_id!r}, "
         f"offload_mode={key.offload_mode!r}, "
         f"hf_token_present={bool(key.hf_token)}, "
+        f"base_model_path={key.base_model_path!r}, "
         f"lora_paths_key={key.lora_paths_key!r}, "
         f"lora_scale_key={key.lora_scale_key!r}"
         ")"
@@ -200,29 +202,34 @@ def get_or_load_pipeline(
     pipeline_ctor,
     offload_mode: OffloadMode = "model",
     hf_token: Optional[str],
+    base_model_path: Optional[str] = None,
     lora_paths: List[Union[str, Dict[str, str]]],
     lora_scale: Union[float, Dict[str, float]],
 ) -> Any:
     """Load and cache a single pipeline instance.
 
-    If model/token/lora/pipeline_class/offload_mode changes, unload old pipeline and load new.
+    If model/token/lora/pipeline_class/offload_mode/base_model_path changes, unload old
+    pipeline and load new.
 
     Args:
         model_id: Model identifier for cache key
         pipeline_ctor: Pipeline class constructor
         offload_mode: CPU offload strategy ("none", "model", "sequential")
         hf_token: HuggingFace token for gated models
+        base_model_path: Optional local model dir to load from instead of the HF repo
         lora_paths: List of LoRA paths to load
         lora_scale: LoRA strength (0.0 to 2.0)
     """
     global _PIPELINE_CACHE
+
+    base_model_path = base_model_path or None
 
     total_start = time.perf_counter()
     logger.info(
         "Pipeline load request "
         f"model_id={model_id} pipeline_ctor={_get_pipeline_id(pipeline_ctor)} "
         f"offload_mode={offload_mode} lora_count={len(lora_paths or [])} "
-        f"hf_token_present={bool(hf_token)}"
+        f"hf_token_present={bool(hf_token)} base_model_path={base_model_path!r}"
     )
 
     resolve_start = time.perf_counter()
@@ -238,6 +245,7 @@ def get_or_load_pipeline(
         pipeline_id=pipeline_id,
         offload_mode=offload_mode,
         hf_token=hf_token or None,
+        base_model_path=base_model_path,
         lora_paths_key=_normalize_lora_paths_for_cache(resolved_loras),
         lora_scale_key=_normalize_lora_scale_for_cache(scale_value),
     )
@@ -262,7 +270,7 @@ def get_or_load_pipeline(
 
     logger.info(f"Loading pipeline model_id={model_id} offload_mode={offload_mode} loras={_safe_lora_summary(resolved_loras)} scale={scale_value}")
     ctor_start = time.perf_counter()
-    pipe = pipeline_ctor(device="cuda", offload_mode=offload_mode, hf_token=hf_token or None)
+    pipe = pipeline_ctor(device="cuda", offload_mode=offload_mode, hf_token=hf_token or None, base_model_path=base_model_path)
     logger.info(f"[TIMING] pipeline_ctor: {time.perf_counter() - ctor_start:.3f}s")
 
     load_start = time.perf_counter()

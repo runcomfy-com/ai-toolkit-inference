@@ -140,6 +140,7 @@ class BasePipeline(ABC):
         device: str = "cuda",
         offload_mode: OffloadMode = "model",
         hf_token: Optional[str] = None,
+        base_model_path: Optional[str] = None,
     ):
         if self.CONFIG is None:
             raise NotImplementedError(f"{self.__class__.__name__} must define CONFIG class attribute")
@@ -147,6 +148,10 @@ class BasePipeline(ABC):
         self.device = device
         self.hf_token = hf_token
         self.offload_mode: OffloadMode = offload_mode
+        # Optional override for the base model source. When set to a local directory, the
+        # pipeline loads weights from disk instead of downloading from Hugging Face. Not all
+        # pipelines honor this yet (currently FLUX.2 / FLUX.2-klein).
+        self.base_model_path: Optional[str] = base_model_path or None
 
         self.pipe = None
         self.lora_loaded = False

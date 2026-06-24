@@ -171,6 +171,33 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
         watcher.join(timeout=interval + 1.0)
 
 
+def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], label: str) -> str:
+    """Resolve a weight file to a local path, bypassing Hugging Face when possible.
+
+    If ``repo_or_path`` is an existing local directory, load ``<dir>/<filename>`` directly and
+    skip any download (the issue #23 workaround). Otherwise treat ``repo_or_path`` as an HF
+    repo id and download it, with the live progress/stall watcher attached.
+    """
+    if os.path.isdir(repo_or_path):
+        local_file = os.path.join(repo_or_path, filename)
+        if not os.path.isfile(local_file):
+            raise FileNotFoundError(
+                f"{label}: '{filename}' not found in local model dir '{repo_or_path}' "
+                f"(expected {local_file})"
+            )
+        logger.info(f"[FLUX2_LOAD] {label} using local file, skipping HF download: {_safe_file_info(local_file)}")
+        return local_file
+
+    import huggingface_hub
+
+    logger.info(
+        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
+        f"filename={filename} token_present={bool(token)}"
+    )
+    with _hf_download_progress(repo_or_path, filename, token):
+        return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
+
+
 # Scheduler config from ai-toolkit
 FLUX2_SCHEDULER_CONFIG = {
     "base_image_seq_len": 256,
@@ -250,7 +277,8 @@ class Flux2Pipeline(BasePipeline):
         logger.info(
             f">>> _load_pipeline() START: self._lora_path={self._lora_path}, "
             f"self._lora_scale={self._lora_scale}, device={self.device}, dtype={self.dtype}, "
-            f"base_model={self.CONFIG.base_model}, transformer_file={self.TRANSFORMER_FILENAME}, "
+            f"base_model={self.CONFIG.base_model}, base_model_path_override={self.base_model_path!r}, "
+            f"transformer_file={self.TRANSFORMER_FILENAME}, "
             f"text_encoder={self.TEXT_ENCODER_REPO}, text_encoder_type={self.TEXT_ENCODER_TYPE}, "
             f"vae_repo={self.VAE_REPO or self.CONFIG.base_model}, hf_token_present={bool(self.hf_token)}"
         )
@@ -270,7 +298,7 @@ class Flux2Pipeline(BasePipeline):
 
         try:
             with _timed_step("import_dependencies"):
-                import huggingface_hub
+                # huggingface_hub is imported lazily by _resolve_model_file / _hf_download_progress.
                 from safetensors.torch import load_file
 
                 # Try to import ai-toolkit components
@@ -293,7 +321,9 @@ class Flux2Pipeline(BasePipeline):
             with _timed_step("pre_load_cleanup"):
                 _maybe_cleanup()
 
-            base_model_path = self.CONFIG.base_model
+            # Honor an optional local model dir override (issue #23). When base_model_path is a
+            # local directory, transformer/VAE weights load from disk instead of downloading.
+            base_model_path = self.base_model_path or self.CONFIG.base_model
 
             # 1. Load Transformer
             t_start = time.perf_counter()
@@ -302,19 +332,12 @@ class Flux2Pipeline(BasePipeline):
                 with torch.device("meta"):
                     transformer = Flux2(self._get_flux2_params())
 
-            # Download transformer weights
+            # Download transformer weights (or load from the local override dir)
             transformer_filename = self.TRANSFORMER_FILENAME
             with _timed_step("transformer_hf_hub_download"):
-                logger.info(
-                    f"[FLUX2_LOAD] transformer_hf_hub_download repo_id={base_model_path} "
-                    f"filename={transformer_filename} token_present={bool(self.hf_token)}"
+                transformer_path = _resolve_model_file(
+                    base_model_path, transformer_filename, self.hf_token, "transformer"
                 )
-                with _hf_download_progress(base_model_path, transformer_filename, self.hf_token):
-                    transformer_path = huggingface_hub.hf_hub_download(
-                        repo_id=base_model_path,
-                        filename=transformer_filename,
-                        token=self.hf_token,
-                    )
                 logger.info(f"[FLUX2_LOAD] transformer_file {_safe_file_info(transformer_path)}")
 
             with _timed_step("transformer_safetensors_load_cpu"):
@@ -380,16 +403,7 @@ class Flux2Pipeline(BasePipeline):
             vae_filename = "ae.safetensors"
             vae_repo = self.VAE_REPO or base_model_path
             with _timed_step("vae_hf_hub_download"):
-                logger.info(
-                    f"[FLUX2_LOAD] vae_hf_hub_download repo_id={vae_repo} "
-                    f"filename={vae_filename} token_present={bool(self.hf_token)}"
-                )
-                with _hf_download_progress(vae_repo, vae_filename, self.hf_token):
-                    vae_path = huggingface_hub.hf_hub_download(
-                        repo_id=vae_repo,
-                        filename=vae_filename,
-                        token=self.hf_token,
-                    )
+                vae_path = _resolve_model_file(vae_repo, vae_filename, self.hf_token, "vae")
                 logger.info(f"[FLUX2_LOAD] vae_file {_safe_file_info(vae_path)}")
 
             with _timed_step("vae_safetensors_load_cpu"):
