@@ -226,6 +226,7 @@ def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkey
     blobs = tmp_path / "blobs"
     blobs.mkdir()
     incomplete = blobs / "abc.incomplete"
+    # Genuinely partial: 1KB present out of a 1MB file, and it never grows -> a real stall.
     incomplete.write_bytes(b"x" * 1024)
 
     monkeypatch.setattr(flux2, "AITK_HF_STALL_MB_PER_S", 0.5)
@@ -237,7 +238,7 @@ def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkey
     logs = []
     watcher = threading.Thread(
         target=flux2._watch_hf_download,
-        args=(stop_event, abort_event, str(blobs), "owner/repo", 1024, 0.01, logs.append),
+        args=(stop_event, abort_event, str(blobs), "owner/repo", 1_000_000, 0.01, logs.append),
     )
     watcher.start()
     deadline = time.time() + 1
@@ -248,3 +249,40 @@ def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkey
 
     assert abort_event.is_set()
     assert any("hf_download_ABORTING" in line for line in logs)
+
+
+def test_hf_download_watcher_treats_full_size_as_finalizing_not_stall(tmp_path, monkeypatch):
+    """At 100% the bytes are on disk; hf_hub_download is finalizing, not stalled.
+
+    The watcher must NOT abort (that would kill a complete download) and must NOT emit a
+    STALLED warning — it logs a finalizing line instead (issue #23, 100% hang case).
+    """
+    from src.pipelines import flux2
+
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    total = 4096
+    incomplete = blobs / "abc.incomplete"
+    incomplete.write_bytes(b"x" * total)  # full size already on disk
+
+    # Aggressive thresholds: if the watcher mistook this for a stall it would abort fast.
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_MB_PER_S", 0.5)
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_TICKS", 1)
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_ABORT_SECONDS", 0.02)
+
+    stop_event = threading.Event()
+    abort_event = threading.Event()
+    logs = []
+    watcher = threading.Thread(
+        target=flux2._watch_hf_download,
+        args=(stop_event, abort_event, str(blobs), "owner/repo", total, 0.01, logs.append),
+    )
+    watcher.start()
+    time.sleep(0.3)  # well past the abort window if it (wrongly) treated this as a stall
+    stop_event.set()
+    watcher.join(timeout=1)
+
+    assert not abort_event.is_set()
+    assert not any("hf_download_STALLED" in line for line in logs)
+    assert not any("hf_download_ABORTING" in line for line in logs)
+    assert any("hf_download_finalizing" in line for line in logs)

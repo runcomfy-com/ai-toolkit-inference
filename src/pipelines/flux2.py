@@ -102,9 +102,13 @@ def _watch_hf_download(
 
     Best-effort side channel: watcher errors are swallowed, but a confirmed no-progress
     window can set ``abort_event`` so the parent kills the isolated download subprocess.
+
+    Once the blob reaches its expected size the download is treated as finalizing
+    (verifying/moving into cache), not stalled: no STALLED warning and never an abort.
     """
     total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
     last_size, last_t, stalled = 0, time.perf_counter(), 0
+    finalize_logged = False
     while not stop_event.wait(interval):
         try:
             incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
@@ -117,6 +121,23 @@ def _watch_hf_download(
         dt = now - last_t
         speed = (size - last_size) / dt / 1e6 if dt > 0 else 0.0
         pct = f"{size / total_bytes * 100:.1f}%" if total_bytes else "?%"
+
+        # Bytes fully on disk but hf_hub_download hasn't returned: it's finalizing
+        # (verifying / moving the blob into the cache), NOT a dropped connection. 0 MB/s here
+        # is expected, so never count it as a stall or abort — aborting would kill a complete
+        # download and a retry would just re-hang at the same finalize step (issue #23).
+        if total_bytes and size >= total_bytes * 0.999:
+            stalled = 0
+            if not finalize_logged:
+                log(
+                    f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} "
+                    f"bytes_complete={size / 1e9:.2f}GB/{total_str}; hf_hub_download is "
+                    f"verifying/moving the file into the cache (not a network stall)"
+                )
+                finalize_logged = True
+            last_size, last_t = size, now
+            continue
+
         log(
             f"[FLUX2_LOAD] hf_download_progress repo_id={repo_id} "
             f"{size / 1e9:.2f}GB/{total_str} ({pct}) {speed:.1f}MB/s"
