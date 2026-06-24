@@ -78,10 +78,11 @@ AITK_HF_STALL_ABORT_SECONDS = float(os.environ.get("AITK_HF_STALL_ABORT_SECONDS"
 # salvaged automatically, so this can be fairly short; it only needs to exceed a healthy
 # finalize. 0 disables (and disables auto-salvage of finalize hangs).
 AITK_HF_FINALIZE_ABORT_SECONDS = float(os.environ.get("AITK_HF_FINALIZE_ABORT_SECONDS", "90"))
-# Force the plain, single-stream HF downloader in the download subprocess by disabling
-# hf_transfer and xet. Their multithreaded backends are the usual cause of a download that
-# reaches 100% then hangs at finalize. On by default for reliability; set to 0 for speed.
-AITK_HF_ROBUST_DOWNLOAD = os.environ.get("AITK_HF_ROBUST_DOWNLOAD", "1").lower() not in ("0", "false", "no")
+# Download strategy. Default is Xet-first (fast), with an automatic plain-HTTP fallback if
+# Xet hangs (its multithreaded backend can reach 100% then never return — issue #23). Set
+# AITK_HF_ROBUST_DOWNLOAD=1 to skip Xet from the start (always plain HTTP) on environments
+# where Xet is known-broken and you want to avoid the one-time hang+fallback latency.
+AITK_HF_ROBUST_DOWNLOAD = os.environ.get("AITK_HF_ROBUST_DOWNLOAD", "0").lower() not in ("0", "false", "no")
 
 
 def _maybe_cleanup() -> None:
@@ -243,17 +244,17 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
         watcher.join(timeout=interval + 1.0)
 
 
-def _hf_subprocess_env(repo_id: str, filename: str) -> Dict[str, str]:
+def _hf_subprocess_env(repo_id: str, filename: str, robust: bool) -> Dict[str, str]:
     """Build the child-process environment for an hf_hub_download subprocess.
 
-    When AITK_HF_ROBUST_DOWNLOAD is set, disable hf_transfer and xet so the child uses the
-    plain single-stream downloader. The child imports huggingface_hub fresh, so these env
-    vars actually take effect (unlike setting them in this already-imported process).
+    When ``robust`` is set, disable hf_transfer and Xet so the child uses the plain
+    single-stream HTTP downloader. The child imports huggingface_hub fresh, so these env vars
+    actually take effect (unlike setting them in this already-imported process).
     """
     env = os.environ.copy()
     env["AITK_HF_REPO_ID"] = repo_id
     env["AITK_HF_FILENAME"] = filename
-    if AITK_HF_ROBUST_DOWNLOAD:
+    if robust:
         env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
         env["HF_HUB_DISABLE_XET"] = "1"
     return env
@@ -264,6 +265,7 @@ def _run_hf_hub_download_subprocess(
     filename: str,
     token: Optional[str],
     abort_event: Optional["threading.Event"],
+    robust: bool = False,
 ) -> str:
     """Run hf_hub_download in a killable child process.
 
@@ -291,7 +293,7 @@ except Exception as exc:
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 '''
-    env = _hf_subprocess_env(repo_id, filename)
+    env = _hf_subprocess_env(repo_id, filename, robust)
 
     proc = subprocess.Popen(
         [sys.executable, "-c", child_code],
@@ -412,10 +414,10 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
     Resolution order:
     1. If ``repo_or_path`` is a local directory, load ``<dir>/<filename>`` directly (issue #23
        workaround).
-    2. If we previously salvaged this file (HF finalize hung), reuse it — no download.
-    3. Otherwise download from HF with the progress/stall watcher; if hf_hub_download is
-       aborted while the bytes are already complete (finalize hang), salvage the blob and
-       return it instead of failing. Fully automatic — no manual file copying.
+    2. If we previously salvaged this file (a prior download hang), reuse it — no download.
+    3. If a byte-complete blob is already on disk, use it directly (skips re-invoking Xet).
+    4. Otherwise download: Xet-first (fast), and on a hang salvage the bytes or fall back to
+       a plain-HTTP retry. Fully automatic — no manual file copying.
     """
     if os.path.isdir(repo_or_path):
         local_file = os.path.join(repo_or_path, filename)
@@ -427,9 +429,7 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
         logger.info(f"[FLUX2_LOAD] {label} using local file, skipping HF download: {_safe_file_info(local_file)}")
         return local_file
 
-    import huggingface_hub
-
-    # Reuse a previously salvaged copy (a prior finalize hang) — skips the download entirely.
+    # Reuse a previously salvaged copy (a prior download hang) — skips the download entirely.
     salvaged = _salvaged_path(repo_or_path, filename)
     if os.path.isfile(salvaged):
         logger.info(f"[FLUX2_LOAD] {label} using previously salvaged file: {_safe_file_info(salvaged)}")
@@ -443,21 +443,41 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
     if pre is not None:
         return pre
 
+    # Attempt 1: default strategy (Xet if the repo supports it — fastest), unless the operator
+    # forced robust mode. Each attempt gets its own progress watcher / abort event.
+    try:
+        return _download_once(repo_or_path, filename, token, label, robust=AITK_HF_ROBUST_DOWNLOAD)
+    except TimeoutError:
+        # The download hung (commonly Xet reaching 100% then never returning). First try the
+        # bytes it already wrote; if incomplete, fall back to a plain-HTTP retry that resumes
+        # and finalizes reliably.
+        recovered = _salvage_incomplete_blob(repo_or_path, filename, token, label)
+        if recovered is not None:
+            return recovered
+        if AITK_HF_ROBUST_DOWNLOAD:
+            raise  # attempt 1 was already plain HTTP; nothing faster-but-reliable to fall back to
+        logger.warning(
+            f"[FLUX2_LOAD] {label} download hung and bytes were incomplete; "
+            f"retrying with HF_HUB_DISABLE_XET=1 (plain HTTP)"
+        )
+        return _download_once(repo_or_path, filename, token, label, robust=True)
+
+
+def _download_once(repo_id: str, filename: str, token: Optional[str], label: str, robust: bool) -> str:
+    """One download attempt with the progress/stall watcher attached.
+
+    ``robust`` forces the plain-HTTP downloader (Xet/hf_transfer disabled) in the subprocess.
+    """
     logger.info(
-        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
-        f"filename={filename} token_present={bool(token)}"
+        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_id} filename={filename} "
+        f"token_present={bool(token)} robust={robust}"
     )
-    with _hf_download_progress(repo_or_path, filename, token) as abort_event:
+    import huggingface_hub
+
+    with _hf_download_progress(repo_id, filename, token) as abort_event:
         if abort_event is None:
-            return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
-        try:
-            return _run_hf_hub_download_subprocess(repo_or_path, filename, token, abort_event)
-        except TimeoutError:
-            # Finalize/stall abort: if the bytes are fully downloaded, salvage them.
-            recovered = _salvage_incomplete_blob(repo_or_path, filename, token, label)
-            if recovered is not None:
-                return recovered
-            raise
+            return huggingface_hub.hf_hub_download(repo_id=repo_id, filename=filename, token=token)
+        return _run_hf_hub_download_subprocess(repo_id, filename, token, abort_event, robust=robust)
 
 
 # Scheduler config from ai-toolkit

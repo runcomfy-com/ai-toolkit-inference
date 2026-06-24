@@ -207,8 +207,8 @@ def test_resolve_model_file_progress_path_uses_abortable_subprocess(monkeypatch)
         calls.update(progress=(repo_id, filename, token))
         yield abort_event
 
-    def fake_subprocess(repo_id, filename, token, got_abort_event):
-        calls.update(download=(repo_id, filename, token, got_abort_event))
+    def fake_subprocess(repo_id, filename, token, got_abort_event, robust=False):
+        calls.update(download=(repo_id, filename, token, got_abort_event, robust))
         return "/cache/blobs/def"
 
     monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
@@ -218,7 +218,8 @@ def test_resolve_model_file_progress_path_uses_abortable_subprocess(monkeypatch)
 
     assert got == "/cache/blobs/def"
     assert calls["progress"] == ("owner/repo", "model.safetensors", "tok")
-    assert calls["download"] == ("owner/repo", "model.safetensors", "tok", abort_event)
+    # First attempt is Xet-first (robust=False).
+    assert calls["download"] == ("owner/repo", "model.safetensors", "tok", abort_event, False)
 
 
 def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkeypatch):
@@ -319,24 +320,54 @@ def test_hf_download_watcher_finalize_timeout_aborts(tmp_path, monkeypatch):
     assert not any("hf_download_STALLED" in line for line in logs)
 
 
-def test_hf_subprocess_env_forces_robust_download(monkeypatch):
+def test_hf_subprocess_env_robust_disables_xet():
     from src.pipelines import flux2
 
-    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", True)
-    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors")
+    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors", robust=True)
     assert env["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
     assert env["HF_HUB_DISABLE_XET"] == "1"
     assert env["AITK_HF_REPO_ID"] == "owner/repo"
     assert env["AITK_HF_FILENAME"] == "model.safetensors"
 
 
-def test_hf_subprocess_env_can_keep_fast_download(monkeypatch):
+def test_hf_subprocess_env_fast_keeps_xet(monkeypatch):
     from src.pipelines import flux2
 
-    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", False)
     monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
-    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors")
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors", robust=False)
     assert "HF_HUB_ENABLE_HF_TRANSFER" not in env
+    assert "HF_HUB_DISABLE_XET" not in env
+
+
+def test_xet_hang_falls_back_to_http(tmp_path, monkeypatch):
+    """Xet-first: if the first attempt hangs and the bytes aren't complete, retry plain HTTP."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname = "owner/repo", "model.safetensors"
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
+    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", False)
+
+    attempts = []
+
+    @contextmanager
+    def fake_progress(repo_id, filename, token):
+        yield threading.Event()
+
+    def fake_sub(repo_id, filename, token, abort_event, robust=False):
+        attempts.append(robust)
+        if not robust:
+            raise TimeoutError("xet hung")  # attempt 1 (Xet) hangs
+        return "/cache/http-ok"  # attempt 2 (plain HTTP) succeeds
+
+    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
+    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", fake_sub)
+
+    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
+    assert got == "/cache/http-ok"
+    assert attempts == [False, True]  # Xet first, then HTTP fallback
 
 
 # --------------------------------------------------------------------------
