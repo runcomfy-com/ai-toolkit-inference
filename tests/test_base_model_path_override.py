@@ -96,6 +96,28 @@ def test_base_model_path_in_cache_key():
 
 
 # --------------------------------------------------------------------------
+# RCAITKLoadPipeline node (split loader/sampler workflow) exposes & forwards it
+# --------------------------------------------------------------------------
+def test_loadpipeline_node_exposes_base_model_path_input():
+    from comfyui_nodes.rc_latent_workflow import RCAITKLoadPipeline
+
+    assert "base_model_path" in RCAITKLoadPipeline.INPUT_TYPES()["optional"]
+
+
+def test_loadpipeline_node_forwards_base_model_path(monkeypatch):
+    from comfyui_nodes import rc_latent_workflow
+
+    captured = {}
+    monkeypatch.setattr(
+        rc_latent_workflow, "get_or_load_pipeline", lambda **kw: captured.update(kw) or object()
+    )
+
+    node = rc_latent_workflow.RCAITKLoadPipeline()
+    node.load(pipeline="flux2", offload_mode="none", hf_token="", base_model_path="/models/flux2-local")
+    assert captured["base_model_path"] == "/models/flux2-local"
+
+
+# --------------------------------------------------------------------------
 # BasePipeline._resolve_base_model_source
 # --------------------------------------------------------------------------
 def _make_pipeline(base_model_path):
