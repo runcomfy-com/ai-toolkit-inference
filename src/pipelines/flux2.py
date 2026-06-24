@@ -73,10 +73,11 @@ AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
 # Hard-abort an HF download subprocess after this many seconds without progress.
 # Set to 0 to disable aborts while keeping progress logs.
 AITK_HF_STALL_ABORT_SECONDS = float(os.environ.get("AITK_HF_STALL_ABORT_SECONDS", "120"))
-# Hard-abort once the blob is fully downloaded but hf_hub_download still hasn't returned
-# (stuck verifying/moving into cache — the issue #23 100% hang). Larger than the stall
-# timeout because legitimate finalization of a multi-GB file takes time. 0 disables.
-AITK_HF_FINALIZE_ABORT_SECONDS = float(os.environ.get("AITK_HF_FINALIZE_ABORT_SECONDS", "300"))
+# Abort once the blob is fully downloaded but hf_hub_download still hasn't returned (stuck
+# verifying/moving into cache — the issue #23 100% hang). On abort the byte-complete blob is
+# salvaged automatically, so this can be fairly short; it only needs to exceed a healthy
+# finalize. 0 disables (and disables auto-salvage of finalize hangs).
+AITK_HF_FINALIZE_ABORT_SECONDS = float(os.environ.get("AITK_HF_FINALIZE_ABORT_SECONDS", "90"))
 # Force the plain, single-stream HF downloader in the download subprocess by disabling
 # hf_transfer and xet. Their multithreaded backends are the usual cause of a download that
 # reaches 100% then hangs at finalize. On by default for reliability; set to 0 for speed.
@@ -158,10 +159,8 @@ def _watch_hf_download(
                 log(
                     f"[FLUX2_LOAD] hf_download_FINALIZE_TIMEOUT repo_id={repo_id} "
                     f"bytes complete but hf_hub_download did not return after ~{int(finalize_elapsed)}s "
-                    f"(AITK_HF_FINALIZE_ABORT_SECONDS={AITK_HF_FINALIZE_ABORT_SECONDS:g}); aborting. "
-                    f"The fully-downloaded weights are already on disk at: {blob_path} -- copy that "
-                    f"file into a folder, rename it to the expected filename, and set base_model_path "
-                    f"to that folder to skip the (broken) HF finalize entirely."
+                    f"(AITK_HF_FINALIZE_ABORT_SECONDS={AITK_HF_FINALIZE_ABORT_SECONDS:g}); aborting and "
+                    f"auto-salvaging the complete blob at {blob_path} (bypasses the hung HF finalize)."
                 )
                 abort_event.set()
             last_size, last_t = size, now
@@ -338,12 +337,76 @@ except Exception as exc:
     return result["path"]
 
 
+def _hf_cache_dir() -> str:
+    try:
+        import huggingface_hub
+        return huggingface_hub.constants.HF_HUB_CACHE
+    except Exception:
+        return os.path.expanduser("~/.cache/huggingface/hub")
+
+
+def _salvaged_path(repo_id: str, filename: str) -> str:
+    """Deterministic aitk-managed path for a salvaged blob, on the HF cache filesystem.
+
+    Lives under the cache root so renaming a sibling blob into it is an instant same-filesystem
+    move (no multi-GB copy).
+    """
+    return os.path.join(_hf_cache_dir(), "aitk_salvaged", repo_id.replace("/", "--"), filename)
+
+
+def _salvage_incomplete_blob(repo_id: str, filename: str, token: Optional[str], label: str) -> Optional[str]:
+    """Recover a byte-complete *.incomplete blob when hf_hub_download's finalize hangs.
+
+    The bytes are fully on disk; only HF's post-download finalize (verify/move/symlink) is
+    stuck (issue #23, large files on slow cache filesystems). Move the complete blob to a
+    stable aitk path (instant same-fs rename) and return it, so we never depend on HF's
+    finalize. Returns None if no complete blob is present.
+    """
+    import huggingface_hub
+
+    blobs_dir = _hf_blobs_dir(_hf_cache_dir(), repo_id)
+    try:
+        incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
+    except OSError:
+        incompletes = []
+    if not incompletes:
+        return None
+    blob = max(incompletes, key=os.path.getsize)
+    size = os.path.getsize(blob)
+
+    expected: Optional[int] = None
+    try:
+        meta = huggingface_hub.get_hf_file_metadata(huggingface_hub.hf_hub_url(repo_id, filename), token=token)
+        expected = meta.size
+    except Exception:
+        pass
+    if expected is not None and size < expected:
+        logger.warning(
+            f"[FLUX2_LOAD] {label} salvage skipped: blob only {size}/{expected} bytes "
+            f"(download was genuinely incomplete, not a finalize hang)"
+        )
+        return None
+
+    salvaged = _salvaged_path(repo_id, filename)
+    os.makedirs(os.path.dirname(salvaged), exist_ok=True)
+    os.replace(blob, salvaged)  # same filesystem as blobs -> atomic, instant
+    logger.info(
+        f"[FLUX2_LOAD] {label} salvaged byte-complete download (bypassed hung HF finalize): "
+        f"{_safe_file_info(salvaged)}"
+    )
+    return salvaged
+
+
 def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], label: str) -> str:
     """Resolve a weight file to a local path, bypassing Hugging Face when possible.
 
-    If ``repo_or_path`` is an existing local directory, load ``<dir>/<filename>`` directly and
-    skip any download (the issue #23 workaround). Otherwise treat ``repo_or_path`` as an HF
-    repo id and download it, with the live progress/stall watcher attached.
+    Resolution order:
+    1. If ``repo_or_path`` is a local directory, load ``<dir>/<filename>`` directly (issue #23
+       workaround).
+    2. If we previously salvaged this file (HF finalize hung), reuse it — no download.
+    3. Otherwise download from HF with the progress/stall watcher; if hf_hub_download is
+       aborted while the bytes are already complete (finalize hang), salvage the blob and
+       return it instead of failing. Fully automatic — no manual file copying.
     """
     if os.path.isdir(repo_or_path):
         local_file = os.path.join(repo_or_path, filename)
@@ -357,6 +420,12 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
 
     import huggingface_hub
 
+    # Reuse a previously salvaged copy (a prior finalize hang) — skips the download entirely.
+    salvaged = _salvaged_path(repo_or_path, filename)
+    if os.path.isfile(salvaged):
+        logger.info(f"[FLUX2_LOAD] {label} using previously salvaged file: {_safe_file_info(salvaged)}")
+        return salvaged
+
     logger.info(
         f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
         f"filename={filename} token_present={bool(token)}"
@@ -364,7 +433,14 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
     with _hf_download_progress(repo_or_path, filename, token) as abort_event:
         if abort_event is None:
             return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
-        return _run_hf_hub_download_subprocess(repo_or_path, filename, token, abort_event)
+        try:
+            return _run_hf_hub_download_subprocess(repo_or_path, filename, token, abort_event)
+        except TimeoutError:
+            # Finalize/stall abort: if the bytes are fully downloaded, salvage them.
+            recovered = _salvage_incomplete_blob(repo_or_path, filename, token, label)
+            if recovered is not None:
+                return recovered
+            raise
 
 
 # Scheduler config from ai-toolkit

@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
@@ -336,3 +337,83 @@ def test_hf_subprocess_env_can_keep_fast_download(monkeypatch):
     monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
     env = flux2._hf_subprocess_env("owner/repo", "model.safetensors")
     assert "HF_HUB_ENABLE_HF_TRANSFER" not in env
+
+
+# --------------------------------------------------------------------------
+# Auto-salvage of a byte-complete blob when HF finalize hangs (issue #23)
+# --------------------------------------------------------------------------
+def _seed_cache(monkeypatch, tmp_path, repo_id, etag, nbytes):
+    """Point the HF cache at tmp_path and write a byte-complete *.incomplete blob."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
+    blobs = tmp_path / ("models--" + repo_id.replace("/", "--")) / "blobs"
+    blobs.mkdir(parents=True)
+    blob = blobs / f"{etag}.incomplete"
+    blob.write_bytes(b"x" * nbytes)
+    return blob
+
+
+def test_salvage_on_finalize_timeout(tmp_path, monkeypatch):
+    """A finalize-aborted download whose bytes are complete is salvaged and returned."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname, nbytes = "owner/repo", "model.safetensors", 4096
+    _seed_cache(monkeypatch, tmp_path, repo, "deadbeef", nbytes)
+    monkeypatch.setattr(
+        huggingface_hub, "get_hf_file_metadata",
+        lambda *a, **k: SimpleNamespace(size=nbytes), raising=False,
+    )
+
+    @contextmanager
+    def fake_progress(repo_id, filename, token):
+        yield threading.Event()
+
+    def boom(*a, **k):
+        raise TimeoutError("finalize hang")
+
+    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
+    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", boom)
+
+    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
+    assert got == flux2._salvaged_path(repo, fname)
+    assert os.path.isfile(got)
+    assert os.path.getsize(got) == nbytes
+
+
+def test_salvaged_file_is_reused_without_download(tmp_path, monkeypatch):
+    """Once salvaged, a later load uses the salvaged file and never calls download."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname = "owner/repo", "model.safetensors"
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
+    salvaged = flux2._salvaged_path(repo, fname)
+    os.makedirs(os.path.dirname(salvaged), exist_ok=True)
+    with open(salvaged, "wb") as f:
+        f.write(b"x" * 16)
+
+    def fail_download(*a, **k):
+        raise AssertionError("download must not be called when a salvaged file exists")
+
+    monkeypatch.setattr(flux2, "_hf_download_progress", fail_download)
+    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
+    assert got == salvaged
+
+
+def test_partial_blob_is_not_salvaged(tmp_path, monkeypatch):
+    """A genuinely incomplete blob (size < expected) must not be passed off as complete."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname = "owner/repo", "model.safetensors"
+    _seed_cache(monkeypatch, tmp_path, repo, "cafef00d", nbytes=1024)
+    monkeypatch.setattr(
+        huggingface_hub, "get_hf_file_metadata",
+        lambda *a, **k: SimpleNamespace(size=1_000_000), raising=False,  # expected >> on-disk
+    )
+    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "transformer") is None
