@@ -8,8 +8,10 @@ the exact same inference behavior as the original.
 
 import gc
 import glob
+import json
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -68,6 +70,9 @@ AITK_HF_PROGRESS_INTERVAL = float(os.environ.get("AITK_HF_PROGRESS_INTERVAL", "5
 # Below this throughput a sample counts as "no progress"; N consecutive samples -> STALLED.
 AITK_HF_STALL_MB_PER_S = float(os.environ.get("AITK_HF_STALL_MB_PER_S", "0.5"))
 AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
+# Hard-abort an HF download subprocess after this many seconds without progress.
+# Set to 0 to disable aborts while keeping progress logs.
+AITK_HF_STALL_ABORT_SECONDS = float(os.environ.get("AITK_HF_STALL_ABORT_SECONDS", "120"))
 
 
 def _maybe_cleanup() -> None:
@@ -86,6 +91,7 @@ def _hf_blobs_dir(cache_dir: str, repo_id: str) -> str:
 
 def _watch_hf_download(
     stop_event: "threading.Event",
+    abort_event: Optional["threading.Event"],
     blobs_dir: str,
     repo_id: str,
     total_bytes: Optional[int],
@@ -94,8 +100,8 @@ def _watch_hf_download(
 ) -> None:
     """Poll the largest *.incomplete blob and log throughput / stall until stop_event is set.
 
-    Best-effort and side-channel only: any error is swallowed so download watching can never
-    break the download itself.
+    Best-effort side channel: watcher errors are swallowed, but a confirmed no-progress
+    window can set ``abort_event`` so the parent kills the isolated download subprocess.
     """
     total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
     last_size, last_t, stalled = 0, time.perf_counter(), 0
@@ -118,12 +124,24 @@ def _watch_hf_download(
         # Don't count the first sample as a stall (no prior baseline to compare against).
         if last_size and speed < AITK_HF_STALL_MB_PER_S:
             stalled += 1
+            stalled_seconds = stalled * interval
             if stalled >= AITK_HF_STALL_TICKS:
                 log(
                     f"[FLUX2_LOAD] hf_download_STALLED repo_id={repo_id} "
-                    f"no_progress_for~{int(stalled * interval)}s at {size / 1e9:.2f}GB/{total_str} "
+                    f"no_progress_for~{int(stalled_seconds)}s at {size / 1e9:.2f}GB/{total_str} "
                     f"(connection likely dropped/throttled)"
                 )
+            if (
+                abort_event is not None
+                and AITK_HF_STALL_ABORT_SECONDS > 0
+                and stalled_seconds >= AITK_HF_STALL_ABORT_SECONDS
+            ):
+                log(
+                    f"[FLUX2_LOAD] hf_download_ABORTING repo_id={repo_id} "
+                    f"no_progress_for~{int(stalled_seconds)}s exceeded "
+                    f"AITK_HF_STALL_ABORT_SECONDS={AITK_HF_STALL_ABORT_SECONDS:g}"
+                )
+                abort_event.set()
         else:
             stalled = 0
         last_size, last_t = size, now
@@ -135,9 +153,10 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
 
     No-op when AITK_HF_PROGRESS is disabled. Resolves the file's total size and the hub cache
     location up front (both best-effort) so the watcher thread can report a percentage.
+    Yields an abort event that is set when the watched blob makes no progress for too long.
     """
     if not AITK_HF_PROGRESS:
-        yield
+        yield None
         return
 
     import huggingface_hub
@@ -157,18 +176,98 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
 
     stop_event = threading.Event()
+    abort_event = threading.Event()
     watcher = threading.Thread(
         target=_watch_hf_download,
-        args=(stop_event, _hf_blobs_dir(cache_dir, repo_id), repo_id, total_bytes, interval, logger.info),
+        args=(stop_event, abort_event, _hf_blobs_dir(cache_dir, repo_id), repo_id, total_bytes, interval, logger.info),
         name=f"hf-dl-watch-{filename}",
         daemon=True,
     )
     watcher.start()
     try:
-        yield
+        yield abort_event
     finally:
         stop_event.set()
         watcher.join(timeout=interval + 1.0)
+
+
+def _run_hf_hub_download_subprocess(
+    repo_id: str,
+    filename: str,
+    token: Optional[str],
+    abort_event: Optional["threading.Event"],
+) -> str:
+    """Run hf_hub_download in a killable child process.
+
+    A stuck requests/hf_transfer read cannot be safely interrupted in-process. Isolating the
+    download lets the parent abort a no-progress tail and surface a retryable error instead
+    of hanging the ComfyUI execution thread indefinitely.
+    """
+    child_code = r'''
+import json
+import os
+import sys
+import traceback
+import huggingface_hub
+
+try:
+    token = sys.stdin.read() or None
+    path = huggingface_hub.hf_hub_download(
+        repo_id=os.environ["AITK_HF_REPO_ID"],
+        filename=os.environ["AITK_HF_FILENAME"],
+        token=token,
+    )
+    print(json.dumps({"ok": True, "path": path}), flush=True)
+except Exception as exc:
+    print(json.dumps({"ok": False, "type": type(exc).__name__, "message": str(exc)}), flush=True)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+'''
+    env = os.environ.copy()
+    env["AITK_HF_REPO_ID"] = repo_id
+    env["AITK_HF_FILENAME"] = filename
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(token or "")
+    proc.stdin.close()
+    proc.stdin = None
+    while proc.poll() is None:
+        if abort_event is not None and abort_event.is_set():
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            raise TimeoutError(
+                f"hf_hub_download for {repo_id}/{filename} made no progress for "
+                f"{AITK_HF_STALL_ABORT_SECONDS:g}s and was aborted; retry should resume from cache"
+            )
+        time.sleep(0.25)
+
+    stdout, _ = proc.communicate()
+    if proc.returncode != 0:
+        message = stdout.strip() or f"exit_code={proc.returncode}"
+        raise RuntimeError(f"hf_hub_download subprocess failed for {repo_id}/{filename}: {message}")
+
+    try:
+        result = json.loads(stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"hf_hub_download subprocess returned invalid output for {repo_id}/{filename}") from exc
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"hf_hub_download subprocess failed for {repo_id}/{filename}: "
+            f"{result.get('type')}: {result.get('message')}"
+        )
+    return result["path"]
 
 
 def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], label: str) -> str:
@@ -194,8 +293,10 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
         f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
         f"filename={filename} token_present={bool(token)}"
     )
-    with _hf_download_progress(repo_or_path, filename, token):
-        return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
+    with _hf_download_progress(repo_or_path, filename, token) as abort_event:
+        if abort_event is None:
+            return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
+        return _run_hf_hub_download_subprocess(repo_or_path, filename, token, abort_event)
 
 
 # Scheduler config from ai-toolkit

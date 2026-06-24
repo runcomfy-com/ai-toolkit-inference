@@ -9,6 +9,9 @@ any real model weights:
     raises a clear error when the file is missing, and otherwise downloads by repo id.
 """
 import os
+import threading
+import time
+from contextlib import contextmanager
 
 import pytest
 
@@ -190,3 +193,58 @@ def test_resolve_model_file_repo_id_downloads(monkeypatch):
     assert got == "/cache/blobs/abc"
     assert calls["repo_id"] == "black-forest-labs/FLUX.2-klein-base-9B"
     assert calls["token"] == "tok"
+
+
+def test_resolve_model_file_progress_path_uses_abortable_subprocess(monkeypatch):
+    from src.pipelines import flux2
+
+    abort_event = threading.Event()
+    calls = {}
+
+    @contextmanager
+    def fake_progress(repo_id, filename, token):
+        calls.update(progress=(repo_id, filename, token))
+        yield abort_event
+
+    def fake_subprocess(repo_id, filename, token, got_abort_event):
+        calls.update(download=(repo_id, filename, token, got_abort_event))
+        return "/cache/blobs/def"
+
+    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
+    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", fake_subprocess)
+
+    got = flux2._resolve_model_file("owner/repo", "model.safetensors", "tok", "transformer")
+
+    assert got == "/cache/blobs/def"
+    assert calls["progress"] == ("owner/repo", "model.safetensors", "tok")
+    assert calls["download"] == ("owner/repo", "model.safetensors", "tok", abort_event)
+
+
+def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkeypatch):
+    from src.pipelines import flux2
+
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    incomplete = blobs / "abc.incomplete"
+    incomplete.write_bytes(b"x" * 1024)
+
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_MB_PER_S", 0.5)
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_TICKS", 1)
+    monkeypatch.setattr(flux2, "AITK_HF_STALL_ABORT_SECONDS", 0.02)
+
+    stop_event = threading.Event()
+    abort_event = threading.Event()
+    logs = []
+    watcher = threading.Thread(
+        target=flux2._watch_hf_download,
+        args=(stop_event, abort_event, str(blobs), "owner/repo", 1024, 0.01, logs.append),
+    )
+    watcher.start()
+    deadline = time.time() + 1
+    while time.time() < deadline and not abort_event.is_set():
+        time.sleep(0.01)
+    stop_event.set()
+    watcher.join(timeout=1)
+
+    assert abort_event.is_set()
+    assert any("hf_download_ABORTING" in line for line in logs)
