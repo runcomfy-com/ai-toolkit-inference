@@ -417,3 +417,38 @@ def test_partial_blob_is_not_salvaged(tmp_path, monkeypatch):
         lambda *a, **k: SimpleNamespace(size=1_000_000), raising=False,  # expected >> on-disk
     )
     assert flux2._salvage_incomplete_blob(repo, fname, "tok", "transformer") is None
+
+
+def test_complete_blob_used_without_invoking_download(tmp_path, monkeypatch):
+    """A byte-complete blob already on disk is used directly; xet/download is never invoked."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname, n = "owner/repo", "model.safetensors", 4096
+    _seed_cache(monkeypatch, tmp_path, repo, "beef", n)
+    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", lambda *a, **k: SimpleNamespace(size=n), raising=False)
+
+    def fail(*a, **k):
+        raise AssertionError("download must not run when a complete blob exists")
+
+    monkeypatch.setattr(flux2, "_hf_download_progress", fail)
+    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
+    assert got == flux2._salvaged_path(repo, fname)
+    assert os.path.isfile(got)
+
+
+def test_pre_salvage_requires_verified_size(tmp_path, monkeypatch):
+    """When metadata can't confirm the size, the speculative pre-salvage declines."""
+    import huggingface_hub
+
+    from src.pipelines import flux2
+
+    repo, fname = "owner/repo", "model.safetensors"
+    _seed_cache(monkeypatch, tmp_path, repo, "beef", 4096)
+
+    def no_meta(*a, **k):
+        raise Exception("403 gated / offline")
+
+    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", no_meta, raising=False)
+    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "x", require_size_match=True) is None

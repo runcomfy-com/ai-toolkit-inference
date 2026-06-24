@@ -354,13 +354,19 @@ def _salvaged_path(repo_id: str, filename: str) -> str:
     return os.path.join(_hf_cache_dir(), "aitk_salvaged", repo_id.replace("/", "--"), filename)
 
 
-def _salvage_incomplete_blob(repo_id: str, filename: str, token: Optional[str], label: str) -> Optional[str]:
+def _salvage_incomplete_blob(
+    repo_id: str, filename: str, token: Optional[str], label: str, require_size_match: bool = False
+) -> Optional[str]:
     """Recover a byte-complete *.incomplete blob when hf_hub_download's finalize hangs.
 
     The bytes are fully on disk; only HF's post-download finalize (verify/move/symlink) is
     stuck (issue #23, large files on slow cache filesystems). Move the complete blob to a
     stable aitk path (instant same-fs rename) and return it, so we never depend on HF's
     finalize. Returns None if no complete blob is present.
+
+    With ``require_size_match`` the blob is only salvaged when its size can be positively
+    confirmed against HF metadata — used for the speculative pre-download check so an
+    in-progress/partial *.incomplete is never mistaken for a complete file.
     """
     import huggingface_hub
 
@@ -380,7 +386,10 @@ def _salvage_incomplete_blob(repo_id: str, filename: str, token: Optional[str], 
         expected = meta.size
     except Exception:
         pass
-    if expected is not None and size < expected:
+    if expected is None:
+        if require_size_match:
+            return None  # can't confirm completeness -> don't speculatively salvage
+    elif size < expected:
         logger.warning(
             f"[FLUX2_LOAD] {label} salvage skipped: blob only {size}/{expected} bytes "
             f"(download was genuinely incomplete, not a finalize hang)"
@@ -425,6 +434,14 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
     if os.path.isfile(salvaged):
         logger.info(f"[FLUX2_LOAD] {label} using previously salvaged file: {_safe_file_info(salvaged)}")
         return salvaged
+
+    # If a byte-complete blob is already on disk (e.g. a prior Xet download that fetched every
+    # chunk but hung in download_files() before the cache move), use it directly. xet_get() has
+    # no "already complete -> return" early-exit like http_get(), so re-invoking the download
+    # would just re-process the complete file and hang again. This skips that entirely.
+    pre = _salvage_incomplete_blob(repo_or_path, filename, token, label, require_size_match=True)
+    if pre is not None:
+        return pre
 
     logger.info(
         f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
