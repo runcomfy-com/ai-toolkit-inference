@@ -123,7 +123,8 @@ def _watch_hf_download(
             incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
             if not incompletes:
                 continue
-            size = os.path.getsize(max(incompletes, key=os.path.getsize))
+            blob_path = max(incompletes, key=os.path.getsize)
+            size = os.path.getsize(blob_path)
         except OSError:
             continue
         now = time.perf_counter()
@@ -158,7 +159,9 @@ def _watch_hf_download(
                     f"[FLUX2_LOAD] hf_download_FINALIZE_TIMEOUT repo_id={repo_id} "
                     f"bytes complete but hf_hub_download did not return after ~{int(finalize_elapsed)}s "
                     f"(AITK_HF_FINALIZE_ABORT_SECONDS={AITK_HF_FINALIZE_ABORT_SECONDS:g}); aborting. "
-                    f"Set a local base_model_path to load from disk, or keep AITK_HF_ROBUST_DOWNLOAD=1."
+                    f"The fully-downloaded weights are already on disk at: {blob_path} -- copy that "
+                    f"file into a folder, rename it to the expected filename, and set base_model_path "
+                    f"to that folder to skip the (broken) HF finalize entirely."
                 )
                 abort_event.set()
             last_size, last_t = size, now
