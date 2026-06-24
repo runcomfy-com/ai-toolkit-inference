@@ -225,11 +225,14 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
     except Exception:
         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
 
+    blobs_dir = _hf_blobs_dir(cache_dir, repo_id)
+    logger.info(f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} (downloaded weights land here)")
+
     stop_event = threading.Event()
     abort_event = threading.Event()
     watcher = threading.Thread(
         target=_watch_hf_download,
-        args=(stop_event, abort_event, _hf_blobs_dir(cache_dir, repo_id), repo_id, total_bytes, interval, logger.info),
+        args=(stop_event, abort_event, blobs_dir, repo_id, total_bytes, interval, logger.info),
         name=f"hf-dl-watch-{filename}",
         daemon=True,
     )
