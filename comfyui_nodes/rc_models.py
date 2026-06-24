@@ -117,10 +117,10 @@ class _RCAitkBase:
                 {
                     "default": "",
                     "tooltip": (
-                        "Optional local directory holding the model weights "
-                        "(e.g. the transformer .safetensors). If set, loads from disk "
-                        "instead of downloading from Hugging Face. Leave empty to use the "
-                        "default HF repo."
+                        "Optional local directory to load the model from instead of "
+                        "downloading from Hugging Face (a local model folder / diffusers "
+                        "snapshot; for FLUX.2 a folder containing the weight files). "
+                        "Leave empty to use the default HF repo."
                     ),
                 },
             )
@@ -333,6 +333,7 @@ class RCZimage(_RCAitkBase):
     DEFAULT_STEPS = 30
     DEFAULT_GUIDANCE = 4.0
     RESOLUTION_STEP = 32
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage import ZImagePipeline
@@ -345,6 +346,7 @@ class RCZimageTurbo(_RCAitkBase):
     DEFAULT_STEPS = 8
     DEFAULT_GUIDANCE = 1.0
     RESOLUTION_STEP = 32
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage_turbo import ZImageTurboPipeline
@@ -368,6 +370,7 @@ class RCFluxDev(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX.1-dev"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 4.0
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux_dev import FluxDevPipeline
@@ -379,6 +382,7 @@ class RCFluxKontext(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX Kontext"
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 1
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux_kontext import FluxKontextPipeline
@@ -440,6 +444,7 @@ class RCFlux2Klein9B(_RCAitkBase):
 class RCFlex1(_RCAitkBase):
     MODEL_ID = "flex1"
     DISPLAY_NAME = "RC Flex.1-alpha"
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flex1_alpha import Flex1AlphaPipeline

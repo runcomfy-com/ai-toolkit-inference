@@ -46,7 +46,7 @@ class ZImagePipeline(BasePipeline):
             )
 
         self.pipe = DiffusersZImagePipeline.from_pretrained(
-            self.CONFIG.base_model,
+            self._resolve_base_model_source(),
             torch_dtype=self.dtype,
             token=self.hf_token,
         )

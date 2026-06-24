@@ -323,7 +323,7 @@ class Flux2Pipeline(BasePipeline):
 
             # Honor an optional local model dir override (issue #23). When base_model_path is a
             # local directory, transformer/VAE weights load from disk instead of downloading.
-            base_model_path = self.base_model_path or self.CONFIG.base_model
+            base_model_path = self._resolve_base_model_source()
 
             # 1. Load Transformer
             t_start = time.perf_counter()

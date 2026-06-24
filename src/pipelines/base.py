@@ -162,6 +162,19 @@ class BasePipeline(ABC):
         self._lora_fused: bool = False  # Track if LoRA is fused into model weights
         self._num_loras_fused: int = 0  # Track number of LoRAs fused (for unfuse reliability check)
 
+    def _resolve_base_model_source(self) -> str:
+        """Return the base-model source: the local override dir if set, else the HF repo id.
+
+        ``from_pretrained``-style loaders accept either a Hugging Face repo id or a local
+        directory, so a pipeline can pass this straight through to load weights from disk
+        instead of downloading (see issue #23). Single-file loaders should additionally route
+        the result through their own per-file resolver.
+        """
+        if self.base_model_path:
+            logger.info(f"Using local base_model_path override: {self.base_model_path} (instead of {self.CONFIG.base_model})")
+            return self.base_model_path
+        return self.CONFIG.base_model
+
     @staticmethod
     def _default_dtype_for_device(device: str) -> torch.dtype:
         """Pick a safe default dtype based on hardware capabilities.
