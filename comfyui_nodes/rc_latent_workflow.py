@@ -218,12 +218,13 @@ class RCAITKLoadPipeline:
                         "default": "",
                         "multiline": False,
                         "tooltip": (
-                            "Optional local directory to load the model from instead of "
-                            "downloading from Hugging Face (a local model folder / diffusers "
-                            "snapshot; for FLUX.2 a folder containing the weight files). "
-                            "Honored by FLUX.2 / FLUX.2-klein and the FLUX.1 / Flex.1 / "
-                            "Z-Image pipelines; ignored by models that don't support it yet. "
-                            "Leave empty to use the default HF repo."
+                            "Optional local directory for the BASE model weights, to avoid "
+                            "downloading them from Hugging Face. For FLUX.2/klein this overrides "
+                            "only the transformer (a folder with the .safetensors); the VAE, text "
+                            "encoder and tokenizer still come from their own HF repos. For "
+                            "from_pretrained models (FLUX.1/Flex.1/Z-Image) point it at a local "
+                            "diffusers snapshot. Honored by FLUX.2/klein, FLUX.1, Flex.1, Z-Image; "
+                            "ignored by other models. Leave empty to use the default HF repo."
                         ),
                     },
                 ),

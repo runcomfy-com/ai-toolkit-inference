@@ -107,14 +107,19 @@ def _watch_hf_download(
     total_bytes: Optional[int],
     interval: float,
     log: Callable[[str], None],
+    incomplete_path: Optional[str] = None,
 ) -> None:
-    """Poll the largest *.incomplete blob and log throughput / stall until stop_event is set.
+    """Poll this file's *.incomplete blob and log throughput / stall until stop_event is set.
 
-    Best-effort side channel: watcher errors are swallowed, but a confirmed no-progress
-    window can set ``abort_event`` so the parent kills the isolated download subprocess.
+    When ``incomplete_path`` (``blobs/<etag>.incomplete`` for the exact file) is known, watch
+    only that blob — so a healthy sibling download in the same repo can never be mistaken for
+    this one's progress and trigger a false abort. Falls back to the largest *.incomplete only
+    when the etag isn't available.
 
-    Once the blob reaches its expected size the download is treated as finalizing
-    (verifying/moving into cache), not stalled: no STALLED warning and never an abort.
+    Best-effort side channel: watcher errors are swallowed, but a confirmed no-progress window
+    can set ``abort_event`` so the parent kills the isolated download subprocess. Once the blob
+    reaches its expected size the download is treated as finalizing (not stalled): no STALLED
+    warning and never an abort... unless it stays stuck past the finalize timeout.
     """
     total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
     last_size, last_t, stalled = 0, time.perf_counter(), 0
@@ -122,10 +127,15 @@ def _watch_hf_download(
     last_finalize_log = 0.0
     while not stop_event.wait(interval):
         try:
-            incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
-            if not incompletes:
-                continue
-            blob_path = max(incompletes, key=os.path.getsize)
+            if incomplete_path is not None:
+                if not os.path.isfile(incomplete_path):
+                    continue
+                blob_path = incomplete_path
+            else:
+                incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
+                if not incompletes:
+                    continue
+                blob_path = max(incompletes, key=os.path.getsize)
             size = os.path.getsize(blob_path)
         except OSError:
             continue
@@ -212,11 +222,12 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
     import huggingface_hub
 
     total_bytes: Optional[int] = None
+    etag: Optional[str] = None
     try:
         meta = huggingface_hub.get_hf_file_metadata(
             huggingface_hub.hf_hub_url(repo_id, filename), token=token
         )
-        total_bytes = meta.size
+        total_bytes, etag = meta.size, meta.etag
     except Exception as exc:  # network/auth/etc — degrade to no-percentage progress
         logger.info(f"[FLUX2_LOAD] hf_download_progress size_lookup_failed {type(exc).__name__}: {exc}")
 
@@ -226,13 +237,16 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
         cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
 
     blobs_dir = _hf_blobs_dir(cache_dir, repo_id)
-    logger.info(f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} (downloaded weights land here)")
+    # Watch this file's exact blob (blobs/<etag>.incomplete) when the etag is known, so a
+    # sibling download in the same repo can't be mistaken for this one's progress.
+    incomplete_path = os.path.join(blobs_dir, f"{etag}.incomplete") if etag else None
+    logger.info(f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} incomplete={os.path.basename(incomplete_path) if incomplete_path else '?'}")
 
     stop_event = threading.Event()
     abort_event = threading.Event()
     watcher = threading.Thread(
         target=_watch_hf_download,
-        args=(stop_event, abort_event, blobs_dir, repo_id, total_bytes, interval, logger.info),
+        args=(stop_event, abort_event, blobs_dir, repo_id, total_bytes, interval, logger.info, incomplete_path),
         name=f"hf-dl-watch-{filename}",
         daemon=True,
     )
@@ -356,45 +370,36 @@ def _salvaged_path(repo_id: str, filename: str) -> str:
     return os.path.join(_hf_cache_dir(), "aitk_salvaged", repo_id.replace("/", "--"), filename)
 
 
-def _salvage_incomplete_blob(
-    repo_id: str, filename: str, token: Optional[str], label: str, require_size_match: bool = False
-) -> Optional[str]:
-    """Recover a byte-complete *.incomplete blob when hf_hub_download's finalize hangs.
+def _salvage_incomplete_blob(repo_id: str, filename: str, token: Optional[str], label: str) -> Optional[str]:
+    """Recover THIS file's byte-complete *.incomplete blob when the download hung.
 
-    The bytes are fully on disk; only HF's post-download finalize (verify/move/symlink) is
-    stuck (issue #23, large files on slow cache filesystems). Move the complete blob to a
-    stable aitk path (instant same-fs rename) and return it, so we never depend on HF's
-    finalize. Returns None if no complete blob is present.
-
-    With ``require_size_match`` the blob is only salvaged when its size can be positively
-    confirmed against HF metadata — used for the speculative pre-download check so an
-    in-progress/partial *.incomplete is never mistaken for a complete file.
+    The bytes are fully on disk; only HF's post-download finalize (or a hung Xet
+    download_files) is stuck (issue #23). The blob is bound to the requested file by its
+    etag — Hugging Face names the blob ``blobs/<etag>.incomplete`` — and is salvaged ONLY
+    when its size matches the expected size exactly. Without that binding, picking the
+    largest *.incomplete could move/destroy a different file's blob and load the wrong
+    weights, so if the etag/size cannot be confirmed we never guess and return None.
     """
     import huggingface_hub
 
-    blobs_dir = _hf_blobs_dir(_hf_cache_dir(), repo_id)
-    try:
-        incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
-    except OSError:
-        incompletes = []
-    if not incompletes:
-        return None
-    blob = max(incompletes, key=os.path.getsize)
-    size = os.path.getsize(blob)
-
-    expected: Optional[int] = None
     try:
         meta = huggingface_hub.get_hf_file_metadata(huggingface_hub.hf_hub_url(repo_id, filename), token=token)
-        expected = meta.size
-    except Exception:
-        pass
-    if expected is None:
-        if require_size_match:
-            return None  # can't confirm completeness -> don't speculatively salvage
-    elif size < expected:
+        etag, expected = meta.etag, meta.size
+    except Exception as exc:
+        logger.info(f"[FLUX2_LOAD] {label} salvage skipped: metadata lookup failed ({type(exc).__name__}: {exc})")
+        return None
+    if not etag or expected is None:
+        logger.info(f"[FLUX2_LOAD] {label} salvage skipped: no etag/size in metadata")
+        return None
+
+    blob = os.path.join(_hf_blobs_dir(_hf_cache_dir(), repo_id), f"{etag}.incomplete")
+    if not os.path.isfile(blob):
+        return None
+    size = os.path.getsize(blob)
+    if size != expected:
         logger.warning(
-            f"[FLUX2_LOAD] {label} salvage skipped: blob only {size}/{expected} bytes "
-            f"(download was genuinely incomplete, not a finalize hang)"
+            f"[FLUX2_LOAD] {label} salvage skipped: blob {etag} is {size}/{expected} bytes "
+            f"(not byte-complete)"
         )
         return None
 
@@ -402,7 +407,7 @@ def _salvage_incomplete_blob(
     os.makedirs(os.path.dirname(salvaged), exist_ok=True)
     os.replace(blob, salvaged)  # same filesystem as blobs -> atomic, instant
     logger.info(
-        f"[FLUX2_LOAD] {label} salvaged byte-complete download (bypassed hung HF finalize): "
+        f"[FLUX2_LOAD] {label} salvaged byte-complete download (etag={etag}, {size} bytes): "
         f"{_safe_file_info(salvaged)}"
     )
     return salvaged
@@ -439,7 +444,7 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
     # chunk but hung in download_files() before the cache move), use it directly. xet_get() has
     # no "already complete -> return" early-exit like http_get(), so re-invoking the download
     # would just re-process the complete file and hang again. This skips that entirely.
-    pre = _salvage_incomplete_blob(repo_or_path, filename, token, label, require_size_match=True)
+    pre = _salvage_incomplete_blob(repo_or_path, filename, token, label)
     if pre is not None:
         return pre
 

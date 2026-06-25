@@ -374,15 +374,25 @@ def test_xet_hang_falls_back_to_http(tmp_path, monkeypatch):
 # Auto-salvage of a byte-complete blob when HF finalize hangs (issue #23)
 # --------------------------------------------------------------------------
 def _seed_cache(monkeypatch, tmp_path, repo_id, etag, nbytes):
-    """Point the HF cache at tmp_path and write a byte-complete *.incomplete blob."""
+    """Point the HF cache at tmp_path and write a *.incomplete blob named by etag."""
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
     blobs = tmp_path / ("models--" + repo_id.replace("/", "--")) / "blobs"
-    blobs.mkdir(parents=True)
+    blobs.mkdir(parents=True, exist_ok=True)
     blob = blobs / f"{etag}.incomplete"
     blob.write_bytes(b"x" * nbytes)
     return blob
+
+
+def _mock_meta(monkeypatch, etag, size):
+    """Make get_hf_file_metadata return a fixed etag/size."""
+    import huggingface_hub
+
+    monkeypatch.setattr(
+        huggingface_hub, "get_hf_file_metadata",
+        lambda *a, **k: SimpleNamespace(etag=etag, size=size, location="x"), raising=False,
+    )
 
 
 def test_salvage_on_finalize_timeout(tmp_path, monkeypatch):
@@ -393,10 +403,7 @@ def test_salvage_on_finalize_timeout(tmp_path, monkeypatch):
 
     repo, fname, nbytes = "owner/repo", "model.safetensors", 4096
     _seed_cache(monkeypatch, tmp_path, repo, "deadbeef", nbytes)
-    monkeypatch.setattr(
-        huggingface_hub, "get_hf_file_metadata",
-        lambda *a, **k: SimpleNamespace(size=nbytes), raising=False,
-    )
+    _mock_meta(monkeypatch, "deadbeef", nbytes)
 
     @contextmanager
     def fake_progress(repo_id, filename, token):
@@ -436,29 +443,22 @@ def test_salvaged_file_is_reused_without_download(tmp_path, monkeypatch):
 
 
 def test_partial_blob_is_not_salvaged(tmp_path, monkeypatch):
-    """A genuinely incomplete blob (size < expected) must not be passed off as complete."""
-    import huggingface_hub
-
+    """A blob whose size != expected (incomplete) must not be passed off as complete."""
     from src.pipelines import flux2
 
     repo, fname = "owner/repo", "model.safetensors"
     _seed_cache(monkeypatch, tmp_path, repo, "cafef00d", nbytes=1024)
-    monkeypatch.setattr(
-        huggingface_hub, "get_hf_file_metadata",
-        lambda *a, **k: SimpleNamespace(size=1_000_000), raising=False,  # expected >> on-disk
-    )
+    _mock_meta(monkeypatch, "cafef00d", 1_000_000)  # expected >> on-disk
     assert flux2._salvage_incomplete_blob(repo, fname, "tok", "transformer") is None
 
 
 def test_complete_blob_used_without_invoking_download(tmp_path, monkeypatch):
     """A byte-complete blob already on disk is used directly; xet/download is never invoked."""
-    import huggingface_hub
-
     from src.pipelines import flux2
 
     repo, fname, n = "owner/repo", "model.safetensors", 4096
     _seed_cache(monkeypatch, tmp_path, repo, "beef", n)
-    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", lambda *a, **k: SimpleNamespace(size=n), raising=False)
+    _mock_meta(monkeypatch, "beef", n)
 
     def fail(*a, **k):
         raise AssertionError("download must not run when a complete blob exists")
@@ -469,8 +469,8 @@ def test_complete_blob_used_without_invoking_download(tmp_path, monkeypatch):
     assert os.path.isfile(got)
 
 
-def test_pre_salvage_requires_verified_size(tmp_path, monkeypatch):
-    """When metadata can't confirm the size, the speculative pre-salvage declines."""
+def test_salvage_skipped_when_metadata_unavailable(tmp_path, monkeypatch):
+    """Without metadata we can't identify/verify the blob, so never guess (return None)."""
     import huggingface_hub
 
     from src.pipelines import flux2
@@ -482,4 +482,24 @@ def test_pre_salvage_requires_verified_size(tmp_path, monkeypatch):
         raise Exception("403 gated / offline")
 
     monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", no_meta, raising=False)
-    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "x", require_size_match=True) is None
+    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "x") is None
+
+
+def test_wrong_blob_is_not_salvaged(tmp_path, monkeypatch):
+    """The blocker fix: a larger sibling blob (different etag) is never salvaged as this file.
+
+    Here the requested file's etag has no blob on disk, but a much larger sibling *.incomplete
+    exists. The old max-by-size logic would have moved/loaded the sibling as this file; the
+    etag binding must decline.
+    """
+    from src.pipelines import flux2
+
+    repo, fname = "owner/repo", "ae.safetensors"
+    # On disk: a giant sibling blob (e.g. the transformer), NOT this file's etag.
+    _seed_cache(monkeypatch, tmp_path, repo, "transformer_etag", nbytes=1_000_000)
+    # Requested file resolves to a different etag with no blob present.
+    _mock_meta(monkeypatch, "vae_etag", 4096)
+    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "vae") is None
+    # And the sibling blob is untouched (not destroyed).
+    sibling = tmp_path / "models--owner--repo" / "blobs" / "transformer_etag.incomplete"
+    assert sibling.is_file() and sibling.stat().st_size == 1_000_000
