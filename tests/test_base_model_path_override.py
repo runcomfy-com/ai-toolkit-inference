@@ -11,8 +11,6 @@ any real model weights:
 import os
 import threading
 import time
-from contextlib import contextmanager
-from types import SimpleNamespace
 
 import pytest
 
@@ -196,310 +194,64 @@ def test_resolve_model_file_repo_id_downloads(monkeypatch):
     assert calls["token"] == "tok"
 
 
-def test_resolve_model_file_progress_path_uses_abortable_subprocess(monkeypatch):
+# --------------------------------------------------------------------------
+# Passive HF download watcher: logs progress / STALLED / finalizing (no abort)
+# --------------------------------------------------------------------------
+def _run_watcher(flux2, blobs_dir, total_bytes, settle=0.12):
+    stop_event = threading.Event()
+    logs = []
+    w = threading.Thread(
+        target=flux2._watch_hf_download,
+        args=(stop_event, str(blobs_dir), "owner/repo", total_bytes, 0.01, logs.append),
+    )
+    w.start()
+    time.sleep(settle)
+    stop_event.set()
+    w.join(timeout=1)
+    return logs
+
+
+def test_watcher_logs_progress_and_stall(tmp_path, monkeypatch):
     from src.pipelines import flux2
-
-    abort_event = threading.Event()
-    calls = {}
-
-    @contextmanager
-    def fake_progress(repo_id, filename, token):
-        calls.update(progress=(repo_id, filename, token))
-        yield abort_event
-
-    def fake_subprocess(repo_id, filename, token, got_abort_event, robust=False):
-        calls.update(download=(repo_id, filename, token, got_abort_event, robust))
-        return "/cache/blobs/def"
-
-    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
-    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", fake_subprocess)
-
-    got = flux2._resolve_model_file("owner/repo", "model.safetensors", "tok", "transformer")
-
-    assert got == "/cache/blobs/def"
-    assert calls["progress"] == ("owner/repo", "model.safetensors", "tok")
-    # First attempt is Xet-first (robust=False).
-    assert calls["download"] == ("owner/repo", "model.safetensors", "tok", abort_event, False)
-
-
-def test_hf_download_watcher_sets_abort_event_after_no_progress(tmp_path, monkeypatch):
-    from src.pipelines import flux2
-
-    blobs = tmp_path / "blobs"
-    blobs.mkdir()
-    incomplete = blobs / "abc.incomplete"
-    # Genuinely partial: 1KB present out of a 1MB file, and it never grows -> a real stall.
-    incomplete.write_bytes(b"x" * 1024)
 
     monkeypatch.setattr(flux2, "AITK_HF_STALL_MB_PER_S", 0.5)
     monkeypatch.setattr(flux2, "AITK_HF_STALL_TICKS", 1)
-    monkeypatch.setattr(flux2, "AITK_HF_STALL_ABORT_SECONDS", 0.02)
-
-    stop_event = threading.Event()
-    abort_event = threading.Event()
-    logs = []
-    watcher = threading.Thread(
-        target=flux2._watch_hf_download,
-        args=(stop_event, abort_event, str(blobs), "owner/repo", 1_000_000, 0.01, logs.append),
-    )
-    watcher.start()
-    deadline = time.time() + 1
-    while time.time() < deadline and not abort_event.is_set():
-        time.sleep(0.01)
-    stop_event.set()
-    watcher.join(timeout=1)
-
-    assert abort_event.is_set()
-    assert any("hf_download_ABORTING" in line for line in logs)
-
-
-def test_hf_download_watcher_treats_full_size_as_finalizing_not_stall(tmp_path, monkeypatch):
-    """At 100% the bytes are on disk; hf_hub_download is finalizing, not stalled.
-
-    The watcher must NOT abort (that would kill a complete download) and must NOT emit a
-    STALLED warning — it logs a finalizing line instead (issue #23, 100% hang case).
-    """
-    from src.pipelines import flux2
-
     blobs = tmp_path / "blobs"
     blobs.mkdir()
+    (blobs / "abc.incomplete").write_bytes(b"x" * 1024)  # 1KB of a 1MB file, never grows
+
+    logs = _run_watcher(flux2, blobs, total_bytes=1_000_000)
+    assert any("hf_download_progress" in line for line in logs)
+    assert any("hf_download_STALLED" in line for line in logs)
+
+
+def test_watcher_logs_finalizing_at_full_size_no_stall(tmp_path):
+    from src.pipelines import flux2
+
     total = 4096
-    incomplete = blobs / "abc.incomplete"
-    incomplete.write_bytes(b"x" * total)  # full size already on disk
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "abc.incomplete").write_bytes(b"x" * total)  # already at 100%
 
-    # Aggressive thresholds: if the watcher mistook this for a stall it would abort fast.
-    monkeypatch.setattr(flux2, "AITK_HF_STALL_MB_PER_S", 0.5)
-    monkeypatch.setattr(flux2, "AITK_HF_STALL_TICKS", 1)
-    monkeypatch.setattr(flux2, "AITK_HF_STALL_ABORT_SECONDS", 0.02)
-
-    stop_event = threading.Event()
-    abort_event = threading.Event()
-    logs = []
-    watcher = threading.Thread(
-        target=flux2._watch_hf_download,
-        args=(stop_event, abort_event, str(blobs), "owner/repo", total, 0.01, logs.append),
-    )
-    watcher.start()
-    time.sleep(0.3)  # well past the abort window if it (wrongly) treated this as a stall
-    stop_event.set()
-    watcher.join(timeout=1)
-
-    assert not abort_event.is_set()
-    assert not any("hf_download_STALLED" in line for line in logs)
-    assert not any("hf_download_ABORTING" in line for line in logs)
+    logs = _run_watcher(flux2, blobs, total_bytes=total)
     assert any("hf_download_finalizing" in line for line in logs)
-
-
-def test_hf_download_watcher_finalize_timeout_aborts(tmp_path, monkeypatch):
-    """A finalize that never returns must still be aborted (with its own message)."""
-    from src.pipelines import flux2
-
-    blobs = tmp_path / "blobs"
-    blobs.mkdir()
-    total = 4096
-    (blobs / "abc.incomplete").write_bytes(b"x" * total)
-
-    monkeypatch.setattr(flux2, "AITK_HF_FINALIZE_ABORT_SECONDS", 0.02)
-
-    stop_event = threading.Event()
-    abort_event = threading.Event()
-    logs = []
-    watcher = threading.Thread(
-        target=flux2._watch_hf_download,
-        args=(stop_event, abort_event, str(blobs), "owner/repo", total, 0.01, logs.append),
-    )
-    watcher.start()
-    deadline = time.time() + 1
-    while time.time() < deadline and not abort_event.is_set():
-        time.sleep(0.01)
-    stop_event.set()
-    watcher.join(timeout=1)
-
-    assert abort_event.is_set()
-    assert any("hf_download_FINALIZE_TIMEOUT" in line for line in logs)
     assert not any("hf_download_STALLED" in line for line in logs)
 
 
-def test_hf_subprocess_env_robust_disables_xet():
-    from src.pipelines import flux2
-
-    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors", robust=True)
-    assert env["HF_HUB_ENABLE_HF_TRANSFER"] == "0"
-    assert env["HF_HUB_DISABLE_XET"] == "1"
-    assert env["AITK_HF_REPO_ID"] == "owner/repo"
-    assert env["AITK_HF_FILENAME"] == "model.safetensors"
-
-
-def test_hf_subprocess_env_fast_keeps_xet(monkeypatch):
-    from src.pipelines import flux2
-
-    monkeypatch.delenv("HF_HUB_ENABLE_HF_TRANSFER", raising=False)
-    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
-    env = flux2._hf_subprocess_env("owner/repo", "model.safetensors", robust=False)
-    assert "HF_HUB_ENABLE_HF_TRANSFER" not in env
-    assert "HF_HUB_DISABLE_XET" not in env
-
-
-def test_xet_hang_falls_back_to_http(tmp_path, monkeypatch):
-    """Xet-first: if the first attempt hangs and the bytes aren't complete, retry plain HTTP."""
-    import huggingface_hub
+def test_watcher_is_log_only_and_leaves_blob_untouched(tmp_path):
+    """Log-only contract: no abort/salvage/subprocess, and the blob is never moved."""
+    import inspect
 
     from src.pipelines import flux2
 
-    repo, fname = "owner/repo", "model.safetensors"
-    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
-    monkeypatch.setattr(flux2, "AITK_HF_ROBUST_DOWNLOAD", False)
+    assert not hasattr(flux2, "_salvage_incomplete_blob")
+    assert not hasattr(flux2, "_run_hf_hub_download_subprocess")
+    assert "abort_event" not in inspect.signature(flux2._watch_hf_download).parameters
 
-    attempts = []
-
-    @contextmanager
-    def fake_progress(repo_id, filename, token):
-        yield threading.Event()
-
-    def fake_sub(repo_id, filename, token, abort_event, robust=False):
-        attempts.append(robust)
-        if not robust:
-            raise TimeoutError("xet hung")  # attempt 1 (Xet) hangs
-        return "/cache/http-ok"  # attempt 2 (plain HTTP) succeeds
-
-    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
-    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", fake_sub)
-
-    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
-    assert got == "/cache/http-ok"
-    assert attempts == [False, True]  # Xet first, then HTTP fallback
-
-
-# --------------------------------------------------------------------------
-# Auto-salvage of a byte-complete blob when HF finalize hangs (issue #23)
-# --------------------------------------------------------------------------
-def _seed_cache(monkeypatch, tmp_path, repo_id, etag, nbytes):
-    """Point the HF cache at tmp_path and write a *.incomplete blob named by etag."""
-    import huggingface_hub
-
-    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
-    blobs = tmp_path / ("models--" + repo_id.replace("/", "--")) / "blobs"
-    blobs.mkdir(parents=True, exist_ok=True)
-    blob = blobs / f"{etag}.incomplete"
-    blob.write_bytes(b"x" * nbytes)
-    return blob
-
-
-def _mock_meta(monkeypatch, etag, size):
-    """Make get_hf_file_metadata return a fixed etag/size."""
-    import huggingface_hub
-
-    monkeypatch.setattr(
-        huggingface_hub, "get_hf_file_metadata",
-        lambda *a, **k: SimpleNamespace(etag=etag, size=size, location="x"), raising=False,
-    )
-
-
-def test_salvage_on_finalize_timeout(tmp_path, monkeypatch):
-    """A finalize-aborted download whose bytes are complete is salvaged and returned."""
-    import huggingface_hub
-
-    from src.pipelines import flux2
-
-    repo, fname, nbytes = "owner/repo", "model.safetensors", 4096
-    _seed_cache(monkeypatch, tmp_path, repo, "deadbeef", nbytes)
-    _mock_meta(monkeypatch, "deadbeef", nbytes)
-
-    @contextmanager
-    def fake_progress(repo_id, filename, token):
-        yield threading.Event()
-
-    def boom(*a, **k):
-        raise TimeoutError("finalize hang")
-
-    monkeypatch.setattr(flux2, "_hf_download_progress", fake_progress)
-    monkeypatch.setattr(flux2, "_run_hf_hub_download_subprocess", boom)
-
-    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
-    assert got == flux2._salvaged_path(repo, fname)
-    assert os.path.isfile(got)
-    assert os.path.getsize(got) == nbytes
-
-
-def test_salvaged_file_is_reused_without_download(tmp_path, monkeypatch):
-    """Once salvaged, a later load uses the salvaged file and never calls download."""
-    import huggingface_hub
-
-    from src.pipelines import flux2
-
-    repo, fname = "owner/repo", "model.safetensors"
-    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path), raising=False)
-    salvaged = flux2._salvaged_path(repo, fname)
-    os.makedirs(os.path.dirname(salvaged), exist_ok=True)
-    with open(salvaged, "wb") as f:
-        f.write(b"x" * 16)
-
-    def fail_download(*a, **k):
-        raise AssertionError("download must not be called when a salvaged file exists")
-
-    monkeypatch.setattr(flux2, "_hf_download_progress", fail_download)
-    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
-    assert got == salvaged
-
-
-def test_partial_blob_is_not_salvaged(tmp_path, monkeypatch):
-    """A blob whose size != expected (incomplete) must not be passed off as complete."""
-    from src.pipelines import flux2
-
-    repo, fname = "owner/repo", "model.safetensors"
-    _seed_cache(monkeypatch, tmp_path, repo, "cafef00d", nbytes=1024)
-    _mock_meta(monkeypatch, "cafef00d", 1_000_000)  # expected >> on-disk
-    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "transformer") is None
-
-
-def test_complete_blob_used_without_invoking_download(tmp_path, monkeypatch):
-    """A byte-complete blob already on disk is used directly; xet/download is never invoked."""
-    from src.pipelines import flux2
-
-    repo, fname, n = "owner/repo", "model.safetensors", 4096
-    _seed_cache(monkeypatch, tmp_path, repo, "beef", n)
-    _mock_meta(monkeypatch, "beef", n)
-
-    def fail(*a, **k):
-        raise AssertionError("download must not run when a complete blob exists")
-
-    monkeypatch.setattr(flux2, "_hf_download_progress", fail)
-    got = flux2._resolve_model_file(repo, fname, "tok", "transformer")
-    assert got == flux2._salvaged_path(repo, fname)
-    assert os.path.isfile(got)
-
-
-def test_salvage_skipped_when_metadata_unavailable(tmp_path, monkeypatch):
-    """Without metadata we can't identify/verify the blob, so never guess (return None)."""
-    import huggingface_hub
-
-    from src.pipelines import flux2
-
-    repo, fname = "owner/repo", "model.safetensors"
-    _seed_cache(monkeypatch, tmp_path, repo, "beef", 4096)
-
-    def no_meta(*a, **k):
-        raise Exception("403 gated / offline")
-
-    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", no_meta, raising=False)
-    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "x") is None
-
-
-def test_wrong_blob_is_not_salvaged(tmp_path, monkeypatch):
-    """The blocker fix: a larger sibling blob (different etag) is never salvaged as this file.
-
-    Here the requested file's etag has no blob on disk, but a much larger sibling *.incomplete
-    exists. The old max-by-size logic would have moved/loaded the sibling as this file; the
-    etag binding must decline.
-    """
-    from src.pipelines import flux2
-
-    repo, fname = "owner/repo", "ae.safetensors"
-    # On disk: a giant sibling blob (e.g. the transformer), NOT this file's etag.
-    _seed_cache(monkeypatch, tmp_path, repo, "transformer_etag", nbytes=1_000_000)
-    # Requested file resolves to a different etag with no blob present.
-    _mock_meta(monkeypatch, "vae_etag", 4096)
-    assert flux2._salvage_incomplete_blob(repo, fname, "tok", "vae") is None
-    # And the sibling blob is untouched (not destroyed).
-    sibling = tmp_path / "models--owner--repo" / "blobs" / "transformer_etag.incomplete"
-    assert sibling.is_file() and sibling.stat().st_size == 1_000_000
+    total = 4096
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    blob = blobs / "abc.incomplete"
+    blob.write_bytes(b"x" * total)
+    _run_watcher(flux2, blobs, total_bytes=total)
+    assert blob.is_file() and blob.stat().st_size == total  # untouched

@@ -8,10 +8,8 @@ the exact same inference behavior as the original.
 
 import gc
 import glob
-import json
 import logging
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -61,28 +59,16 @@ AITK_FLUX2_HOTSWAP = os.environ.get("AITK_FLUX2_HOTSWAP", "").lower() in ("1", "
 
 # --- HF download observability (issue #23) -----------------------------------
 # hf_hub_download exposes no progress callback and its tqdm bar is swallowed in the
-# RunComfy/ComfyUI server context, so a frozen multi-GB download looks identical to a
-# slow one in our logs. We watch the on-disk *.incomplete blob from a side thread and
-# log throughput + a STALLED line so a hang is distinguishable from progress.
+# RunComfy/ComfyUI server context, so a frozen multi-GB download looks identical to a slow
+# one in our logs. We watch the on-disk *.incomplete blob from a side thread and log
+# throughput, a STALLED line, and a finalizing line so a hang is distinguishable from
+# progress. This is observability only — it never aborts, retries, or moves files.
 AITK_HF_PROGRESS = os.environ.get("AITK_HF_PROGRESS", "1").lower() not in ("0", "false", "no")
 # Seconds between progress samples.
 AITK_HF_PROGRESS_INTERVAL = float(os.environ.get("AITK_HF_PROGRESS_INTERVAL", "5"))
 # Below this throughput a sample counts as "no progress"; N consecutive samples -> STALLED.
 AITK_HF_STALL_MB_PER_S = float(os.environ.get("AITK_HF_STALL_MB_PER_S", "0.5"))
 AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
-# Hard-abort an HF download subprocess after this many seconds without progress.
-# Set to 0 to disable aborts while keeping progress logs.
-AITK_HF_STALL_ABORT_SECONDS = float(os.environ.get("AITK_HF_STALL_ABORT_SECONDS", "120"))
-# Abort once the blob is fully downloaded but hf_hub_download still hasn't returned (stuck
-# verifying/moving into cache — the issue #23 100% hang). On abort the byte-complete blob is
-# salvaged automatically, so this can be fairly short; it only needs to exceed a healthy
-# finalize. 0 disables (and disables auto-salvage of finalize hangs).
-AITK_HF_FINALIZE_ABORT_SECONDS = float(os.environ.get("AITK_HF_FINALIZE_ABORT_SECONDS", "90"))
-# Download strategy. Default is Xet-first (fast), with an automatic plain-HTTP fallback if
-# Xet hangs (its multithreaded backend can reach 100% then never return — issue #23). Set
-# AITK_HF_ROBUST_DOWNLOAD=1 to skip Xet from the start (always plain HTTP) on environments
-# where Xet is known-broken and you want to avoid the one-time hang+fallback latency.
-AITK_HF_ROBUST_DOWNLOAD = os.environ.get("AITK_HF_ROBUST_DOWNLOAD", "0").lower() not in ("0", "false", "no")
 
 
 def _maybe_cleanup() -> None:
@@ -101,7 +87,6 @@ def _hf_blobs_dir(cache_dir: str, repo_id: str) -> str:
 
 def _watch_hf_download(
     stop_event: "threading.Event",
-    abort_event: Optional["threading.Event"],
     blobs_dir: str,
     repo_id: str,
     total_bytes: Optional[int],
@@ -109,17 +94,14 @@ def _watch_hf_download(
     log: Callable[[str], None],
     incomplete_path: Optional[str] = None,
 ) -> None:
-    """Poll this file's *.incomplete blob and log throughput / stall until stop_event is set.
+    """Poll this file's *.incomplete blob and log progress / stall / finalizing.
 
-    When ``incomplete_path`` (``blobs/<etag>.incomplete`` for the exact file) is known, watch
-    only that blob — so a healthy sibling download in the same repo can never be mistaken for
-    this one's progress and trigger a false abort. Falls back to the largest *.incomplete only
-    when the etag isn't available.
-
-    Best-effort side channel: watcher errors are swallowed, but a confirmed no-progress window
-    can set ``abort_event`` so the parent kills the isolated download subprocess. Once the blob
-    reaches its expected size the download is treated as finalizing (not stalled): no STALLED
-    warning and never an abort... unless it stays stuck past the finalize timeout.
+    Observability only: it logs what the download is doing and never aborts it, retries, or
+    touches any files. When ``incomplete_path`` (``blobs/<etag>.incomplete`` for the exact
+    file) is known it watches only that blob, so a healthy sibling download in the same repo
+    can't be mistaken for this one's progress; otherwise it falls back to the largest
+    *.incomplete. A blob that reaches its expected size is reported as finalizing
+    (hf_hub_download verifying/moving into cache), distinct from a network stall.
     """
     total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
     last_size, last_t, stalled = 0, time.perf_counter(), 0
@@ -144,10 +126,9 @@ def _watch_hf_download(
         speed = (size - last_size) / dt / 1e6 if dt > 0 else 0.0
         pct = f"{size / total_bytes * 100:.1f}%" if total_bytes else "?%"
 
-        # Bytes fully on disk but hf_hub_download hasn't returned: it's finalizing
-        # (verifying / moving the blob into the cache), NOT a dropped connection. 0 MB/s here
-        # is expected, so this is never a "stall". But it can hang indefinitely (issue #23),
-        # so abort after AITK_HF_FINALIZE_ABORT_SECONDS with an actionable error.
+        # Bytes fully on disk but hf_hub_download hasn't returned: it's finalizing (verifying /
+        # moving the blob into the cache, or a hung Xet reconstruction), NOT a dropped
+        # connection. 0 MB/s here is expected, so this is reported as finalizing, not a stall.
         if total_bytes and size >= total_bytes * 0.999:
             stalled = 0
             if finalize_start is None:
@@ -158,22 +139,12 @@ def _watch_hf_download(
                     f"bytes_complete={size / 1e9:.2f}GB/{total_str}; hf_hub_download is "
                     f"verifying/moving the file into the cache (not a network stall)"
                 )
-            finalize_elapsed = now - finalize_start
-            if now - last_finalize_log >= 30:
-                log(f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} still finalizing ~{int(finalize_elapsed)}s")
-                last_finalize_log = now
-            if (
-                abort_event is not None
-                and AITK_HF_FINALIZE_ABORT_SECONDS > 0
-                and finalize_elapsed >= AITK_HF_FINALIZE_ABORT_SECONDS
-            ):
+            elif now - last_finalize_log >= 30:
                 log(
-                    f"[FLUX2_LOAD] hf_download_FINALIZE_TIMEOUT repo_id={repo_id} "
-                    f"bytes complete but hf_hub_download did not return after ~{int(finalize_elapsed)}s "
-                    f"(AITK_HF_FINALIZE_ABORT_SECONDS={AITK_HF_FINALIZE_ABORT_SECONDS:g}); aborting and "
-                    f"auto-salvaging the complete blob at {blob_path} (bypasses the hung HF finalize)."
+                    f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} "
+                    f"still finalizing ~{int(now - finalize_start)}s"
                 )
-                abort_event.set()
+                last_finalize_log = now
             last_size, last_t = size, now
             continue
 
@@ -184,24 +155,12 @@ def _watch_hf_download(
         # Don't count the first sample as a stall (no prior baseline to compare against).
         if last_size and speed < AITK_HF_STALL_MB_PER_S:
             stalled += 1
-            stalled_seconds = stalled * interval
             if stalled >= AITK_HF_STALL_TICKS:
                 log(
                     f"[FLUX2_LOAD] hf_download_STALLED repo_id={repo_id} "
-                    f"no_progress_for~{int(stalled_seconds)}s at {size / 1e9:.2f}GB/{total_str} "
+                    f"no_progress_for~{int(stalled * interval)}s at {size / 1e9:.2f}GB/{total_str} "
                     f"(connection likely dropped/throttled)"
                 )
-            if (
-                abort_event is not None
-                and AITK_HF_STALL_ABORT_SECONDS > 0
-                and stalled_seconds >= AITK_HF_STALL_ABORT_SECONDS
-            ):
-                log(
-                    f"[FLUX2_LOAD] hf_download_ABORTING repo_id={repo_id} "
-                    f"no_progress_for~{int(stalled_seconds)}s exceeded "
-                    f"AITK_HF_STALL_ABORT_SECONDS={AITK_HF_STALL_ABORT_SECONDS:g}"
-                )
-                abort_event.set()
         else:
             stalled = 0
         last_size, last_t = size, now
@@ -209,14 +168,14 @@ def _watch_hf_download(
 
 @contextmanager
 def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], interval: float = AITK_HF_PROGRESS_INTERVAL):
-    """Log live progress for an hf_hub_download wrapped by this context manager.
+    """Run a passive progress watcher for the duration of an hf_hub_download call.
 
-    No-op when AITK_HF_PROGRESS is disabled. Resolves the file's total size and the hub cache
-    location up front (both best-effort) so the watcher thread can report a percentage.
-    Yields an abort event that is set when the watched blob makes no progress for too long.
+    No-op when AITK_HF_PROGRESS is disabled. Resolves the file size + etag up front (both
+    best-effort) so the watcher can report a percentage and watch the exact blob. Logging
+    only — it does not abort, retry, or otherwise change the download.
     """
     if not AITK_HF_PROGRESS:
-        yield None
+        yield
         return
 
     import huggingface_hub
@@ -240,189 +199,32 @@ def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], int
     # Watch this file's exact blob (blobs/<etag>.incomplete) when the etag is known, so a
     # sibling download in the same repo can't be mistaken for this one's progress.
     incomplete_path = os.path.join(blobs_dir, f"{etag}.incomplete") if etag else None
-    logger.info(f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} incomplete={os.path.basename(incomplete_path) if incomplete_path else '?'}")
+    logger.info(
+        f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} "
+        f"incomplete={os.path.basename(incomplete_path) if incomplete_path else '?'}"
+    )
 
     stop_event = threading.Event()
-    abort_event = threading.Event()
     watcher = threading.Thread(
         target=_watch_hf_download,
-        args=(stop_event, abort_event, blobs_dir, repo_id, total_bytes, interval, logger.info, incomplete_path),
+        args=(stop_event, blobs_dir, repo_id, total_bytes, interval, logger.info, incomplete_path),
         name=f"hf-dl-watch-{filename}",
         daemon=True,
     )
     watcher.start()
     try:
-        yield abort_event
+        yield
     finally:
         stop_event.set()
         watcher.join(timeout=interval + 1.0)
 
 
-def _hf_subprocess_env(repo_id: str, filename: str, robust: bool) -> Dict[str, str]:
-    """Build the child-process environment for an hf_hub_download subprocess.
-
-    When ``robust`` is set, disable hf_transfer and Xet so the child uses the plain
-    single-stream HTTP downloader. The child imports huggingface_hub fresh, so these env vars
-    actually take effect (unlike setting them in this already-imported process).
-    """
-    env = os.environ.copy()
-    env["AITK_HF_REPO_ID"] = repo_id
-    env["AITK_HF_FILENAME"] = filename
-    if robust:
-        env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-        env["HF_HUB_DISABLE_XET"] = "1"
-    return env
-
-
-def _run_hf_hub_download_subprocess(
-    repo_id: str,
-    filename: str,
-    token: Optional[str],
-    abort_event: Optional["threading.Event"],
-    robust: bool = False,
-) -> str:
-    """Run hf_hub_download in a killable child process.
-
-    A stuck requests/hf_transfer read cannot be safely interrupted in-process. Isolating the
-    download lets the parent abort a no-progress tail and surface a retryable error instead
-    of hanging the ComfyUI execution thread indefinitely.
-    """
-    child_code = r'''
-import json
-import os
-import sys
-import traceback
-import huggingface_hub
-
-try:
-    token = sys.stdin.read() or None
-    path = huggingface_hub.hf_hub_download(
-        repo_id=os.environ["AITK_HF_REPO_ID"],
-        filename=os.environ["AITK_HF_FILENAME"],
-        token=token,
-    )
-    print(json.dumps({"ok": True, "path": path}), flush=True)
-except Exception as exc:
-    print(json.dumps({"ok": False, "type": type(exc).__name__, "message": str(exc)}), flush=True)
-    traceback.print_exc(file=sys.stderr)
-    sys.exit(1)
-'''
-    env = _hf_subprocess_env(repo_id, filename, robust)
-
-    proc = subprocess.Popen(
-        [sys.executable, "-c", child_code],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        env=env,
-    )
-    assert proc.stdin is not None
-    proc.stdin.write(token or "")
-    proc.stdin.close()
-    proc.stdin = None
-    while proc.poll() is None:
-        if abort_event is not None and abort_event.is_set():
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-            raise TimeoutError(
-                f"hf_hub_download for {repo_id}/{filename} was aborted by the progress watcher "
-                f"(no-progress or finalize timeout — see [FLUX2_LOAD] logs). Retry may resume from "
-                f"cache; if it recurs, set a local base_model_path or keep AITK_HF_ROBUST_DOWNLOAD=1."
-            )
-        time.sleep(0.25)
-
-    stdout, _ = proc.communicate()
-    if proc.returncode != 0:
-        message = stdout.strip() or f"exit_code={proc.returncode}"
-        raise RuntimeError(f"hf_hub_download subprocess failed for {repo_id}/{filename}: {message}")
-
-    try:
-        result = json.loads(stdout.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"hf_hub_download subprocess returned invalid output for {repo_id}/{filename}") from exc
-    if not result.get("ok"):
-        raise RuntimeError(
-            f"hf_hub_download subprocess failed for {repo_id}/{filename}: "
-            f"{result.get('type')}: {result.get('message')}"
-        )
-    return result["path"]
-
-
-def _hf_cache_dir() -> str:
-    try:
-        import huggingface_hub
-        return huggingface_hub.constants.HF_HUB_CACHE
-    except Exception:
-        return os.path.expanduser("~/.cache/huggingface/hub")
-
-
-def _salvaged_path(repo_id: str, filename: str) -> str:
-    """Deterministic aitk-managed path for a salvaged blob, on the HF cache filesystem.
-
-    Lives under the cache root so renaming a sibling blob into it is an instant same-filesystem
-    move (no multi-GB copy).
-    """
-    return os.path.join(_hf_cache_dir(), "aitk_salvaged", repo_id.replace("/", "--"), filename)
-
-
-def _salvage_incomplete_blob(repo_id: str, filename: str, token: Optional[str], label: str) -> Optional[str]:
-    """Recover THIS file's byte-complete *.incomplete blob when the download hung.
-
-    The bytes are fully on disk; only HF's post-download finalize (or a hung Xet
-    download_files) is stuck (issue #23). The blob is bound to the requested file by its
-    etag — Hugging Face names the blob ``blobs/<etag>.incomplete`` — and is salvaged ONLY
-    when its size matches the expected size exactly. Without that binding, picking the
-    largest *.incomplete could move/destroy a different file's blob and load the wrong
-    weights, so if the etag/size cannot be confirmed we never guess and return None.
-    """
-    import huggingface_hub
-
-    try:
-        meta = huggingface_hub.get_hf_file_metadata(huggingface_hub.hf_hub_url(repo_id, filename), token=token)
-        etag, expected = meta.etag, meta.size
-    except Exception as exc:
-        logger.info(f"[FLUX2_LOAD] {label} salvage skipped: metadata lookup failed ({type(exc).__name__}: {exc})")
-        return None
-    if not etag or expected is None:
-        logger.info(f"[FLUX2_LOAD] {label} salvage skipped: no etag/size in metadata")
-        return None
-
-    blob = os.path.join(_hf_blobs_dir(_hf_cache_dir(), repo_id), f"{etag}.incomplete")
-    if not os.path.isfile(blob):
-        return None
-    size = os.path.getsize(blob)
-    if size != expected:
-        logger.warning(
-            f"[FLUX2_LOAD] {label} salvage skipped: blob {etag} is {size}/{expected} bytes "
-            f"(not byte-complete)"
-        )
-        return None
-
-    salvaged = _salvaged_path(repo_id, filename)
-    os.makedirs(os.path.dirname(salvaged), exist_ok=True)
-    os.replace(blob, salvaged)  # same filesystem as blobs -> atomic, instant
-    logger.info(
-        f"[FLUX2_LOAD] {label} salvaged byte-complete download (etag={etag}, {size} bytes): "
-        f"{_safe_file_info(salvaged)}"
-    )
-    return salvaged
-
-
 def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], label: str) -> str:
-    """Resolve a weight file to a local path, bypassing Hugging Face when possible.
+    """Resolve a weight file to a local path.
 
-    Resolution order:
-    1. If ``repo_or_path`` is a local directory, load ``<dir>/<filename>`` directly (issue #23
-       workaround).
-    2. If we previously salvaged this file (a prior download hang), reuse it — no download.
-    3. If a byte-complete blob is already on disk, use it directly (skips re-invoking Xet).
-    4. Otherwise download: Xet-first (fast), and on a hang salvage the bytes or fall back to
-       a plain-HTTP retry. Fully automatic — no manual file copying.
+    If ``repo_or_path`` is a local directory, load ``<dir>/<filename>`` directly and skip the
+    download (the issue #23 manual workaround). Otherwise treat it as an HF repo id and
+    download it, with the passive progress/stall watcher logging alongside.
     """
     if os.path.isdir(repo_or_path):
         local_file = os.path.join(repo_or_path, filename)
@@ -434,55 +236,14 @@ def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], 
         logger.info(f"[FLUX2_LOAD] {label} using local file, skipping HF download: {_safe_file_info(local_file)}")
         return local_file
 
-    # Reuse a previously salvaged copy (a prior download hang) — skips the download entirely.
-    salvaged = _salvaged_path(repo_or_path, filename)
-    if os.path.isfile(salvaged):
-        logger.info(f"[FLUX2_LOAD] {label} using previously salvaged file: {_safe_file_info(salvaged)}")
-        return salvaged
-
-    # If a byte-complete blob is already on disk (e.g. a prior Xet download that fetched every
-    # chunk but hung in download_files() before the cache move), use it directly. xet_get() has
-    # no "already complete -> return" early-exit like http_get(), so re-invoking the download
-    # would just re-process the complete file and hang again. This skips that entirely.
-    pre = _salvage_incomplete_blob(repo_or_path, filename, token, label)
-    if pre is not None:
-        return pre
-
-    # Attempt 1: default strategy (Xet if the repo supports it — fastest), unless the operator
-    # forced robust mode. Each attempt gets its own progress watcher / abort event.
-    try:
-        return _download_once(repo_or_path, filename, token, label, robust=AITK_HF_ROBUST_DOWNLOAD)
-    except TimeoutError:
-        # The download hung (commonly Xet reaching 100% then never returning). First try the
-        # bytes it already wrote; if incomplete, fall back to a plain-HTTP retry that resumes
-        # and finalizes reliably.
-        recovered = _salvage_incomplete_blob(repo_or_path, filename, token, label)
-        if recovered is not None:
-            return recovered
-        if AITK_HF_ROBUST_DOWNLOAD:
-            raise  # attempt 1 was already plain HTTP; nothing faster-but-reliable to fall back to
-        logger.warning(
-            f"[FLUX2_LOAD] {label} download hung and bytes were incomplete; "
-            f"retrying with HF_HUB_DISABLE_XET=1 (plain HTTP)"
-        )
-        return _download_once(repo_or_path, filename, token, label, robust=True)
-
-
-def _download_once(repo_id: str, filename: str, token: Optional[str], label: str, robust: bool) -> str:
-    """One download attempt with the progress/stall watcher attached.
-
-    ``robust`` forces the plain-HTTP downloader (Xet/hf_transfer disabled) in the subprocess.
-    """
-    logger.info(
-        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_id} filename={filename} "
-        f"token_present={bool(token)} robust={robust}"
-    )
     import huggingface_hub
 
-    with _hf_download_progress(repo_id, filename, token) as abort_event:
-        if abort_event is None:
-            return huggingface_hub.hf_hub_download(repo_id=repo_id, filename=filename, token=token)
-        return _run_hf_hub_download_subprocess(repo_id, filename, token, abort_event, robust=robust)
+    logger.info(
+        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
+        f"filename={filename} token_present={bool(token)}"
+    )
+    with _hf_download_progress(repo_or_path, filename, token):
+        return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
 
 
 # Scheduler config from ai-toolkit
