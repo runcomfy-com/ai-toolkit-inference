@@ -399,3 +399,94 @@ class TestKrea2GenerateIntegration:
                 prompt="x", width=128, height=128, num_inference_steps=2,
                 guidance_scale=0.0, seed=1,
             )
+
+
+class TestKrea2ModelOptions:
+    """kv_cache / match_target_res must be overridable per request.
+
+    Every prod krea2 edit job that has reference images in its sample config was
+    trained before ai-toolkit's preset flipped on 2026-07-16, i.e. with kv_cache
+    off and match_target_res off. The values are not recorded in the LoRA file,
+    so without an override the reference-image path cannot be reproduced at all.
+    """
+
+    def test_defaults_follow_the_current_preset(self):
+        from src.pipelines.krea2 import Krea2EditPipeline, Krea2EditTurboPipeline
+
+        for cls in (Krea2EditPipeline, Krea2EditTurboPipeline):
+            pipe = cls(device="cpu", offload_mode="none")
+            assert pipe.use_kv_cache is True
+            assert pipe.match_target_res is True
+
+    def test_override_applies(self):
+        from src.pipelines.krea2 import Krea2EditPipeline
+
+        pipe = Krea2EditPipeline(device="cpu", offload_mode="none")
+        pipe.apply_model_options(kv_cache=False, match_target_res=False)
+        assert pipe.use_kv_cache is False
+        assert pipe.match_target_res is False
+
+    def test_absent_option_resets_to_default(self):
+        """Each call is authoritative -- the pipeline cache shares instances, so
+        a later request must not inherit an earlier request's override."""
+        from src.pipelines.krea2 import Krea2EditPipeline
+
+        pipe = Krea2EditPipeline(device="cpu", offload_mode="none")
+        pipe.apply_model_options(kv_cache=False)
+        assert pipe.use_kv_cache is False
+        pipe.apply_model_options()  # next request says nothing
+        assert pipe.use_kv_cache is True
+
+    def test_override_reaches_the_sampler(self, tiny_transformer):
+        from src.pipelines.krea2 import Krea2EditPipeline
+
+        pipe = Krea2EditPipeline(device="cpu", offload_mode="none")
+        pipe.pipe = _make_sampler(tiny_transformer, kv_cache=True)
+        pipe.apply_model_options(kv_cache=False)
+        assert pipe.pipe.kv_cache is False
+
+    def test_t2i_pipelines_ignore_the_options(self):
+        """A request carrying edit options for a t2i model must not blow up."""
+        from src.pipelines.krea2 import Krea2Pipeline as K2
+
+        pipe = K2(device="cpu", offload_mode="none")
+        pipe.apply_model_options(kv_cache=True, match_target_res=True)
+        assert pipe.use_kv_cache is True  # override honoured, harmless
+        pipe.apply_model_options()
+        assert pipe.use_kv_cache is False  # back to the t2i default
+
+    def test_unknown_options_are_ignored(self):
+        from src.pipelines.krea2 import Krea2EditPipeline
+
+        pipe = Krea2EditPipeline(device="cpu", offload_mode="none")
+        pipe.apply_model_options(some_future_option=123)
+        assert pipe.use_kv_cache is True
+
+    def test_base_pipeline_default_is_a_noop(self):
+        """Every other model inherits a no-op, so the executor can call this
+        unconditionally."""
+        from src.pipelines import get_pipeline_class
+
+        for model_id in ("flux", "sdxl", "chroma", "ltx2"):
+            cls = get_pipeline_class(model_id)
+            assert cls is not None
+            assert cls.apply_model_options(object.__new__(cls), kv_cache=False) is None
+
+    def test_request_schema_exposes_the_options(self):
+        from src.schemas.request import InferenceInput
+
+        req = InferenceInput(
+            model="krea2_o_edit",
+            loras=[{"path": "x.safetensors"}],
+            prompts=[{"prompt": "hi", "ctrl_img": "data:image/png;base64,AA=="}],
+            kv_cache=False,
+            match_target_res=False,
+        )
+        assert req.get_model_options() == {"kv_cache": False, "match_target_res": False}
+
+        bare = InferenceInput(
+            model="krea2",
+            loras=[{"path": "x.safetensors"}],
+            prompts=[{"prompt": "hi"}],
+        )
+        assert bare.get_model_options() == {}

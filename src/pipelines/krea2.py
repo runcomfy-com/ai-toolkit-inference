@@ -424,6 +424,58 @@ class Krea2Pipeline(BasePipeline):
         self.vl_processor = None  # Qwen3-VL AutoProcessor, edit only
         self._lora_path = None
         self._lora_scale = 1.0
+        # Per-request overrides for the two edit settings that must match how the
+        # LoRA was trained. None => use the class default. See
+        # apply_model_options() for why these cannot be auto-detected.
+        self._kv_cache_override: Optional[bool] = None
+        self._match_target_res_override: Optional[bool] = None
+
+    @property
+    def use_kv_cache(self) -> bool:
+        if self._kv_cache_override is not None:
+            return self._kv_cache_override
+        return self.USE_KV_CACHE
+
+    @property
+    def match_target_res(self) -> bool:
+        if self._match_target_res_override is not None:
+            return self._match_target_res_override
+        return self.MATCH_TARGET_RES
+
+    def apply_model_options(self, **options) -> None:
+        """Accept per-request `kv_cache` / `match_target_res` overrides.
+
+        Both must match the values the LoRA was TRAINED with, and neither is
+        recoverable from the adapter file -- ai-toolkit's LoRA metadata carries
+        only training_info / ss_base_model_version / ss_output_name / the
+        trigger word, never model_kwargs.
+
+        This matters in practice: ai-toolkit's krea2 edit preset gained
+        `kv_cache: true` + `match_target_res: true` on 2026-07-16. Adapters
+        trained before that ran with kv_cache off and match_target_res off, and
+        `kv_cache` is not an optional speed-up -- it changes the attention mask,
+        so a mismatch silently produces wrong output rather than an error.
+
+        The class defaults follow the current preset, so callers that say
+        nothing get the right behavior for newly trained adapters.
+
+        Each call is AUTHORITATIVE for the whole option set: an option that is
+        absent resets to the class default rather than inheriting whatever the
+        previous request set. The pipeline cache hands the same instance to
+        every request, so anything else would leak one request's settings into
+        the next.
+        """
+        kv_cache = options.get("kv_cache")
+        self._kv_cache_override = None if kv_cache is None else bool(kv_cache)
+        match_target_res = options.get("match_target_res")
+        self._match_target_res_override = (
+            None if match_target_res is None else bool(match_target_res)
+        )
+
+        # The sampler reads kv_cache per call, so this takes effect immediately
+        # with no reload.
+        if self.pipe is not None:
+            self.pipe.kv_cache = self.use_kv_cache
 
     # ------------------------------------------------------------------ load
 
@@ -557,7 +609,7 @@ class Krea2Pipeline(BasePipeline):
             dtype=self.dtype,
             patch_size=KREA2_MMDIT_CONFIG["patch"],
             vae_scale_factor=VAE_SCALE_FACTOR,
-            kv_cache=self.USE_KV_CACHE,
+            kv_cache=self.use_kv_cache,
             schedule=dict(SCHEDULE),
         )
 
@@ -789,13 +841,13 @@ class Krea2Pipeline(BasePipeline):
         from torchvision.transforms.functional import to_tensor
 
         sc = self.CONFIG.resolution_divisor  # 16
-        budget = target_pixels if self.MATCH_TARGET_RES else CONTROL_IMAGE_MAX_PIXELS
+        budget = target_pixels if self.match_target_res else CONTROL_IMAGE_MAX_PIXELS
 
         out = []
         for im in pils:
             t = to_tensor(im).unsqueeze(0).to(self.device, dtype=self.dtype)
             h, w = t.shape[2], t.shape[3]
-            if self.MATCH_TARGET_RES or h * w > budget:
+            if self.match_target_res or h * w > budget:
                 ratio = h / w
                 new_h = math.sqrt(budget * ratio)
                 new_w = new_h / ratio
