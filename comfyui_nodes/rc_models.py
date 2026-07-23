@@ -690,3 +690,64 @@ class RCWan22TI2V5B(_RCAitkBase):
     def _pipeline_ctor(self):
         from src.pipelines.wan22_5b import Wan22TI2V5BPipeline
         return Wan22TI2V5BPipeline
+
+
+# ===== Krea 2 =====
+# RESOLUTION_STEP must equal the pipeline's resolution_divisor (16 = VAE f8 x
+# patch 2), otherwise the widget offers sizes the server silently floors.
+
+
+class RCKrea2(_RCAitkBase):
+    MODEL_ID = "krea2"
+    DISPLAY_NAME = "RC Krea 2"
+    RESOLUTION_STEP = 16
+    DEFAULT_STEPS = 30
+    DEFAULT_GUIDANCE = 4.0
+
+    def _pipeline_ctor(self):
+        from src.pipelines.krea2 import Krea2Pipeline
+        return Krea2Pipeline
+
+
+class RCKrea2Turbo(_RCAitkBase):
+    MODEL_ID = "krea2_turbo"
+    DISPLAY_NAME = "RC Krea 2 Turbo"
+    RESOLUTION_STEP = 16
+    DEFAULT_STEPS = 9
+    DEFAULT_GUIDANCE = 1.0
+    # guidance_scale <= 1 maps to internal guidance 0, so the uncond pass is
+    # skipped entirely and a negative prompt would have no effect.
+    SUPPORTS_NEGATIVE = False
+
+    def _pipeline_ctor(self):
+        from src.pipelines.krea2 import Krea2TurboPipeline
+        return Krea2TurboPipeline
+
+
+class RCKrea2Edit(_RCAitkBase):
+    MODEL_ID = "krea2_o_edit"
+    DISPLAY_NAME = "RC Krea 2 Edit"
+    RESOLUTION_STEP = 16
+    DEFAULT_STEPS = 30
+    DEFAULT_GUIDANCE = 4.0
+    REQUIRES_CONTROL_IMAGE = True
+    CONTROL_IMAGE_SLOTS = 3
+
+    def _pipeline_ctor(self):
+        from src.pipelines.krea2 import Krea2EditPipeline
+        return Krea2EditPipeline
+
+
+class RCKrea2EditTurbo(_RCAitkBase):
+    MODEL_ID = "krea2_o_edit_turbo"
+    DISPLAY_NAME = "RC Krea 2 Edit Turbo"
+    RESOLUTION_STEP = 16
+    DEFAULT_STEPS = 8
+    DEFAULT_GUIDANCE = 1.0
+    SUPPORTS_NEGATIVE = False
+    REQUIRES_CONTROL_IMAGE = True
+    CONTROL_IMAGE_SLOTS = 3
+
+    def _pipeline_ctor(self):
+        from src.pipelines.krea2 import Krea2EditTurboPipeline
+        return Krea2EditTurboPipeline

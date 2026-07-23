@@ -164,6 +164,10 @@ class RCAITKLoadPipeline:
         "qwen_image_edit",
         "qwen_image_edit_plus",
         "qwen_image_edit_plus_2511",
+        "krea2",
+        "krea2_turbo",
+        "krea2_o_edit",
+        "krea2_o_edit_turbo",
         # Video models
         "ltx2",
         "ltx2.3",
@@ -249,6 +253,10 @@ class RCAITKLoadPipeline:
             "wan22_14b_t2v": lambda: __import__("src.pipelines.wan22_t2v", fromlist=["Wan22T2V14BPipeline"]).Wan22T2V14BPipeline,
             "wan22_14b_i2v": lambda: __import__("src.pipelines.wan22_i2v", fromlist=["Wan22I2V14BPipeline"]).Wan22I2V14BPipeline,
             "wan22_5b": lambda: __import__("src.pipelines.wan22_5b", fromlist=["Wan22TI2V5BPipeline"]).Wan22TI2V5BPipeline,
+            "krea2": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2Pipeline"]).Krea2Pipeline,
+            "krea2_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2TurboPipeline"]).Krea2TurboPipeline,
+            "krea2_o_edit": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditPipeline"]).Krea2EditPipeline,
+            "krea2_o_edit_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditTurboPipeline"]).Krea2EditTurboPipeline,
         }
 
         if pipeline not in ctor_map:

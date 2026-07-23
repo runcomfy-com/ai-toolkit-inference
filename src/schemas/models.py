@@ -70,6 +70,14 @@ class ModelType(str, Enum):
     LTX2 = "ltx2"  # ltx2.json (supports both T2V and I2V via control_image parameter)
     LTX2_3 = "ltx2.3"  # LTX-2.3 (supports both T2V and I2V via control_image parameter)
 
+    # Krea 2
+    # Ids mirror the ai-toolkit training arch names with ':' replaced by '_',
+    # which is the convention scripts/request_samples_from_config.py relies on.
+    KREA2 = "krea2"  # ai-toolkit arch: krea2
+    KREA2_TURBO = "krea2_turbo"  # ai-toolkit arch: krea2:turbo
+    KREA2_O_EDIT = "krea2_o_edit"  # ai-toolkit arch: krea2:o_edit
+    KREA2_O_EDIT_TURBO = "krea2_o_edit_turbo"  # ai-toolkit arch: krea2:o_edit_turbo
+
 
 def get_supported_models() -> list[str]:
     """Get list of all supported model type values."""
