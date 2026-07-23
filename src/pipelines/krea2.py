@@ -83,6 +83,58 @@ def _flush():
 
 _AITK_MODULES: Optional[Dict[str, Any]] = None
 
+_KREA2_REL_PATH = os.path.join("extensions_built_in", "diffusion_models", "krea2", "src")
+
+
+def _find_krea2_src_dir() -> str:
+    """Locate ai-toolkit's krea2/src directory.
+
+    Tries, in order:
+
+    1. `settings.ai_toolkit_path` -- AI_TOOLKIT_PATH env var, else
+       <repo>/vendor/ai-toolkit, else /app/ai-toolkit (config.py's own chain,
+       whose last step already matches the production image layout).
+    2. Wherever `extensions_built_in` already resolves on sys.path. The
+       production image (Images/ai-toolkit-inference/Dockerfile) exposes
+       ai-toolkit through PYTHONPATH rather than AI_TOOLKIT_PATH, so this covers
+       a checkout mounted somewhere other than the three paths above.
+       find_spec() locates the package without executing its __init__.
+
+    Raises ImportError listing everything that was tried.
+    """
+    import importlib.util
+
+    tried = []
+
+    def _try(candidate: str) -> bool:
+        if candidate in tried:
+            return False
+        tried.append(candidate)
+        return os.path.isdir(candidate)
+
+    configured = settings.ai_toolkit_path
+    if configured:
+        candidate = os.path.join(configured, _KREA2_REL_PATH)
+        if _try(candidate):
+            return candidate
+
+    try:
+        spec = importlib.util.find_spec("extensions_built_in")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        for location in spec.submodule_search_locations:
+            candidate = os.path.join(location, "diffusion_models", "krea2", "src")
+            if _try(candidate):
+                return candidate
+
+    raise ImportError(
+        "Krea 2 requires an ostris/ai-toolkit checkout containing "
+        "extensions_built_in/diffusion_models/krea2/ (ai-toolkit >= v0.11.0). "
+        "Tried:\n  " + "\n  ".join(tried) + "\n"
+        "Set AI_TOOLKIT_PATH, put ai-toolkit on PYTHONPATH, or run install.py."
+    )
+
 
 def _load_aitk_krea2_modules() -> Dict[str, Any]:
     """Load ai-toolkit's krea2 leaf modules by file path.
@@ -104,16 +156,7 @@ def _load_aitk_krea2_modules() -> Dict[str, Any]:
     import importlib.util
     from types import ModuleType
 
-    root = settings.ai_toolkit_path
-    src_dir = os.path.join(
-        root, "extensions_built_in", "diffusion_models", "krea2", "src"
-    )
-    if not os.path.isdir(src_dir):
-        raise ImportError(
-            "Krea 2 requires an ostris/ai-toolkit checkout containing "
-            f"extensions_built_in/diffusion_models/krea2/. Looked in {src_dir!r}. "
-            "Set AI_TOOLKIT_PATH or run install.py to vendor it."
-        )
+    src_dir = _find_krea2_src_dir()
 
     # A synthetic parent package so `from .mmdit import ...` inside pipeline.py
     # resolves without touching the real extensions_built_in package.
@@ -530,11 +573,20 @@ class Krea2Pipeline(BasePipeline):
     def _assert_edit_capable(self):
         """Edit conditioning drives Qwen3-VL M-RoPE through mm_token_type_ids.
 
-        ai-toolkit trains against transformers==5.5.3 (requirements_base.txt:5)
-        while this repo pins 4.57.3, where Qwen3-VL derives vision positions from
-        (input_ids, image_grid_thw, video_grid_thw, attention_mask) and would
-        swallow mm_token_type_ids through **kwargs -- producing wrong
-        conditioning with no error at all. Fail loudly instead.
+        In an older transformers, Qwen3-VL derives vision positions from
+        (input_ids, image_grid_thw, video_grid_thw, attention_mask) and swallows
+        mm_token_type_ids through **kwargs -- producing wrong conditioning with
+        no error at all. Fail loudly instead of silently mis-conditioning.
+
+        Version landscape (checked 2026-07-23):
+          - ai-toolkit pins transformers==5.5.3, which is what krea2 edit was
+            trained against.
+          - The production image (Images/ai-toolkit-inference/Dockerfile)
+            installs ai-toolkit's requirements and then only this repo's
+            requirements.txt (web deps), so the container gets 5.5.3 and edit
+            works there.
+          - requirements-inference.txt -- the LOCAL dev install -- pins 4.57.3,
+            so a local run may trip this guard even though the deployment is fine.
         """
         import inspect
 
