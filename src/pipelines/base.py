@@ -219,6 +219,26 @@ class BasePipeline(ABC):
         """Get pipeline configuration."""
         return cls.CONFIG
 
+    def apply_model_options(self, **options) -> None:
+        """Apply per-request, model-specific options to an already-loaded pipeline.
+
+        Default is a no-op: most models have no such options, and unknown keys
+        are ignored so a request carrying an option for a different model does
+        not fail.
+
+        This exists for settings that must match how the LoRA was TRAINED but
+        cannot be read back from the LoRA file. Krea 2 edit is the motivating
+        case: `kv_cache` changes the attention mask, ai-toolkit's preset for it
+        flipped on 2026-07-16, and the trained value is not recorded in the
+        adapter's metadata -- so the caller has to supply it.
+
+        Implementations must be cheap and must not require a reload; the
+        pipeline cache hands out the same instance across requests, so anything
+        set here is overwritten by the next request that sets it and falls back
+        to the class default otherwise.
+        """
+        return None
+
     def load(self, lora_paths: List[str], lora_scale: float = 1.0):
         """Load the pipeline and LoRA weights."""
         logger.info(f"Loading pipeline: {self.CONFIG.base_model}")

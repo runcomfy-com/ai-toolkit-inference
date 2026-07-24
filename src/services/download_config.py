@@ -123,6 +123,44 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
     # They are lazy-loaded on first High-mode request in LTX23Pipeline to avoid
     # making them unconditional dependencies for Default-mode requests.
     ModelType.LTX2_3: DownloadConfig(),
+    # Krea 2
+    # Only the flat single-file checkpoint at the repo root is loaded. The krea/*
+    # repos ALSO ship a full diffusers folder layout (the same weights again, and
+    # a copy of the text encoder / VAE), so allow_patterns avoids a duplicate
+    # ~26 GB download per model.
+    # NOTE: every entry sharing a repo must declare identical allow_patterns --
+    # _merge_download_tasks() in cli/download_models.py dedupes by repo_id and
+    # collapses to an unfiltered full-repo pull if either side is None.
+    # NOTE: krea/Krea-2-* are HF gated ("auto"); HF_TOKEN must belong to an
+    # account that has accepted the Krea 2 license.
+    ModelType.KREA2: DownloadConfig(
+        allow_patterns=["raw.safetensors"],
+        extras=[
+            ExtraDownload(repo_id="Qwen/Qwen3-VL-4B-Instruct"),
+            ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
+        ],
+    ),
+    ModelType.KREA2_TURBO: DownloadConfig(
+        allow_patterns=["turbo.safetensors"],
+        extras=[
+            ExtraDownload(repo_id="Qwen/Qwen3-VL-4B-Instruct"),
+            ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
+        ],
+    ),
+    ModelType.KREA2_O_EDIT: DownloadConfig(
+        allow_patterns=["raw.safetensors"],
+        extras=[
+            ExtraDownload(repo_id="Qwen/Qwen3-VL-4B-Instruct"),
+            ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
+        ],
+    ),
+    ModelType.KREA2_O_EDIT_TURBO: DownloadConfig(
+        allow_patterns=["turbo.safetensors"],
+        extras=[
+            ExtraDownload(repo_id="Qwen/Qwen3-VL-4B-Instruct"),
+            ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
+        ],
+    ),
 }
 
 

@@ -308,6 +308,9 @@ async def create_inference(
         "hf_token": hf_token,
         "trigger_word": request_input.trigger_word,
         "lora_scales": lora_scales,
+        # Model-specific options that must match how the LoRA was trained
+        # (e.g. Krea 2 edit's kv_cache). Empty for models that declare none.
+        "model_options": request_input.get_model_options(),
     }
 
     # Create task

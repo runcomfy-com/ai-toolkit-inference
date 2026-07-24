@@ -106,6 +106,39 @@ class InferenceInput(BaseModel):
     # Prompts (required, all parameters are in PromptItem)
     prompts: List[PromptItem] = Field(..., description="List of prompts with their parameters")
 
+    # --- Model-specific options -------------------------------------------
+    # These must match how the LoRA was TRAINED and cannot be read back from the
+    # adapter file (ai-toolkit's LoRA metadata does not record model_kwargs).
+    # Ignored by models that do not use them.
+    kv_cache: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Krea 2 edit only. Must match the training config's "
+            "model_kwargs.kv_cache -- it changes the attention mask, so a "
+            "mismatch silently produces wrong output. Defaults to the current "
+            "ai-toolkit preset (true); set false for adapters trained before "
+            "2026-07-16."
+        ),
+    )
+    match_target_res: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Krea 2 edit only. Must match the training config's "
+            "model_kwargs.match_target_res. When true, each reference image is "
+            "area-matched to the target resolution; when false it is only "
+            "capped at 1 MP. Defaults to the current preset (true)."
+        ),
+    )
+
+    def get_model_options(self) -> dict:
+        """Model-specific options to hand to BasePipeline.apply_model_options()."""
+        options = {}
+        if self.kv_cache is not None:
+            options["kv_cache"] = self.kv_cache
+        if self.match_target_res is not None:
+            options["match_target_res"] = self.match_target_res
+        return options
+
     @model_validator(mode="after")
     def validate_prompts(self):
         """Ensure at least one prompt is provided."""

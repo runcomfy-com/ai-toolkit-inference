@@ -137,6 +137,17 @@ class InferenceExecutor:
             timings["get_pipeline"] = t.elapsed
             timings["pipeline_details"] = pipeline_timings
 
+            # Model-specific options that must match how the LoRA was trained
+            # (e.g. Krea 2 edit's kv_cache). Cheap and reload-free; a no-op for
+            # models that declare none. Applied after get_pipeline because the
+            # pipeline cache may hand back a shared instance configured by an
+            # earlier request.
+            model_options = task.inputs.get("model_options") or {}
+            try:
+                pipeline.apply_model_options(**model_options)
+            except Exception as e:
+                logger.warning(f"Failed to apply model options {model_options}: {e}")
+
             with Timer("inference_total") as t:
                 outputs = self._run_inference(
                     task=task,

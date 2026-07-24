@@ -51,6 +51,12 @@ if TYPE_CHECKING:
     from .lumina2 import Lumina2Pipeline
     from .omnigen2 import OmniGen2Pipeline
     from .ltx2 import LTX2Pipeline, LTX23Pipeline
+    from .krea2 import (
+        Krea2Pipeline,
+        Krea2TurboPipeline,
+        Krea2EditPipeline,
+        Krea2EditTurboPipeline,
+    )
 
 
 # Lazy import mapping: attribute name -> (module_name, class_name)
@@ -100,6 +106,11 @@ _LAZY_IMPORTS = {
     # LTX-2
     "LTX2Pipeline": (".ltx2", "LTX2Pipeline"),
     "LTX23Pipeline": (".ltx2", "LTX23Pipeline"),
+    # Krea 2
+    "Krea2Pipeline": (".krea2", "Krea2Pipeline"),
+    "Krea2TurboPipeline": (".krea2", "Krea2TurboPipeline"),
+    "Krea2EditPipeline": (".krea2", "Krea2EditPipeline"),
+    "Krea2EditTurboPipeline": (".krea2", "Krea2EditTurboPipeline"),
 }
 
 # Cache for lazily loaded classes
@@ -150,6 +161,11 @@ _MODEL_TYPE_TO_CLASS = {
     # LTX-2
     ModelType.LTX2: "LTX2Pipeline",
     ModelType.LTX2_3: "LTX23Pipeline",
+    # Krea 2
+    ModelType.KREA2: "Krea2Pipeline",
+    ModelType.KREA2_TURBO: "Krea2TurboPipeline",
+    ModelType.KREA2_O_EDIT: "Krea2EditPipeline",
+    ModelType.KREA2_O_EDIT_TURBO: "Krea2EditTurboPipeline",
 }
 
 
@@ -251,6 +267,11 @@ __all__ = [
     # LTX-2
     "LTX2Pipeline",
     "LTX23Pipeline",
+    # Krea 2
+    "Krea2Pipeline",
+    "Krea2TurboPipeline",
+    "Krea2EditPipeline",
+    "Krea2EditTurboPipeline",
     # Registry and helpers
     "get_pipeline_class",
     "get_pipeline_config",

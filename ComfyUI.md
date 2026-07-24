@@ -83,6 +83,8 @@ Some nodes require an `IMAGE` input as a control/reference image:
 - `RCQwenImageEditPlus` (+ optional `control_image_2`, `control_image_3`)
 - `RCQwenImageEditPlus2511` (+ optional `control_image_2`, `control_image_3`)
 - `RCHiDreamE1`
+- `RCKrea2Edit` (+ optional `control_image_2`, `control_image_3`)
+- `RCKrea2EditTurbo` (+ optional `control_image_2`, `control_image_3`)
 - `RCWan21I2V14B`
 - `RCWan21I2V14B480P`
 - `RCWan22I2V14B`
@@ -203,6 +205,11 @@ See `example_workflows/rc_ltx23_high_minimal.json` for a complete example.
   - `RCQwenImageEdit`
   - `RCQwenImageEditPlus`
   - `RCQwenImageEditPlus2511`
+- Krea 2:
+  - `RCKrea2`
+  - `RCKrea2Turbo`
+  - `RCKrea2Edit`
+  - `RCKrea2EditTurbo`
 - Other image models:
   - `RCChroma`
   - `RCHiDream`

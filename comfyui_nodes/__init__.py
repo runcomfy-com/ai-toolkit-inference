@@ -31,6 +31,10 @@ from .rc_models import (
     RCWan22T2V14B,
     RCWan22I2V14B,
     RCWan22TI2V5B,
+    RCKrea2,
+    RCKrea2Turbo,
+    RCKrea2Edit,
+    RCKrea2EditTurbo,
 )
 
 # Latent workflow nodes
@@ -93,6 +97,12 @@ NODE_CLASS_MAPPINGS = {
     "RCWan22I2V14B": RCWan22I2V14B,
     "RCWan22TI2V5B": RCWan22TI2V5B,
 
+    # Krea 2
+    "RCKrea2": RCKrea2,
+    "RCKrea2Turbo": RCKrea2Turbo,
+    "RCKrea2Edit": RCKrea2Edit,
+    "RCKrea2EditTurbo": RCKrea2EditTurbo,
+
     # Latent workflow nodes
     "RCAITKLoRA": RCAITKLoRA,
     "RCAITKLoadPipeline": RCAITKLoadPipeline,
@@ -146,6 +156,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCWan22T2V14B": "RC Wan 2.2 T2V 14B",
     "RCWan22I2V14B": "RC Wan 2.2 I2V 14B",
     "RCWan22TI2V5B": "RC Wan 2.2 TI2V 5B",
+
+    # Krea 2
+    "RCKrea2": "RC Krea 2",
+    "RCKrea2Turbo": "RC Krea 2 Turbo",
+    "RCKrea2Edit": "RC Krea 2 Edit",
+    "RCKrea2EditTurbo": "RC Krea 2 Edit Turbo",
 
     # Latent workflow nodes
     "RCAITKLoRA": "RC AITK LoRA",

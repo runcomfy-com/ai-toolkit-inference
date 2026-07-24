@@ -54,6 +54,8 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | [HiDream I1](hidream/) | `hidream` | `HiDream-ai/HiDream-I1-Full` | Heavy pipeline: loads Llama-3.1-8B-Instruct as an extra text encoder and fuses LoRA into the transformer. |
 | [Lumina Image 2.0](lumina2/) | `lumina2` | `Alpha-VLLM/Lumina-Image-2.0` | Uses a FlowMatch scheduler config aligned to AI Toolkit’s Lumina2 sampler defaults. |
 | [OmniGen2](omnigen2/) | `omnigen2` | `OmniGen2/OmniGen2` | Optional reference images (up to 3 via `ctrl_img(_1..3)`). Applies chat template for preview matching. |
+| [Krea 2](krea2/) | `krea2` | `krea/Krea-2-Raw` | Requires AI Toolkit. Gated weights (HF_TOKEN needed). `guidance_scale` is 0-normalized (`g-1` internally). LoRA merged at load. |
+| [Krea 2 Turbo](krea2-turbo/) | `krea2_turbo` | `krea/Krea-2-Turbo` | Step-distilled: defaults (9 steps / guidance 1.0) skip the uncond pass, so the negative prompt is inert. The training adapter is never loaded. |
 
 ## Editing / control-image
 
@@ -64,6 +66,8 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | [Qwen Image Edit Plus (2509)](qwen-image-edit-plus/) | `qwen_image_edit_plus` | `Qwen/Qwen-Image-Edit-2509` | Multi-image edit. Supports up to 3 control images (`ctrl_img_1..3`). Prompt encoding uses those images. |
 | [Qwen Image Edit Plus (2511)](qwen-image-edit-plus-2511/) | `qwen_image_edit_plus_2511` | `Qwen/Qwen-Image-Edit-2511` | Multi-image edit with `fuse_lora` (weights are merged). Supports up to 3 control images. |
 | [HiDream E1 (HiDream-E1-Full)](hidream-e1/) | `hidream_e1` | `HiDream-ai/HiDream-E1-Full` | Image editing. Requires `ctrl_img`. Uses fused LoRA (reload required for different scales). |
+| [Krea 2 Edit](krea2-o-edit/) | `krea2_o_edit` | `krea/Krea-2-Raw` | In-context edit, up to 3 reference images. `kv_cache` is on, matching the `krea2:o_edit` training preset — a LoRA trained with it must be inferenced with it. |
+| [Krea 2 Edit Turbo](krea2-o-edit-turbo/) | `krea2_o_edit_turbo` | `krea/Krea-2-Turbo` | Step-distilled in-context edit (8 steps / guidance 1.0). Same reference-image and `kv_cache` behavior as Krea 2 Edit. |
 
 ## Video generation
 

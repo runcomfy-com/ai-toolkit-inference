@@ -1,0 +1,59 @@
+{
+  "0": {
+    "inputs": {
+      "image": "aitk_control.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Reference Image"
+    }
+  },
+  "1": {
+    "inputs": {
+      "pipeline": "krea2_o_edit_turbo",
+      "offload_mode": "none",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "Load Krea 2 Edit Turbo Pipeline"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": [
+        "1",
+        0
+      ],
+      "prompt": "a beautiful landscape, high quality, photorealistic",
+      "negative_prompt": "",
+      "width": 1024,
+      "height": 1024,
+      "steps": 8,
+      "cfg": 1.0,
+      "seed": 42,
+      "control_image": [
+        "0",
+        0
+      ]
+    },
+    "class_type": "RCAITKGenerate",
+    "_meta": {
+      "title": "Generate"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "rc_krea2_o_edit_turbo",
+      "images": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  }
+}
