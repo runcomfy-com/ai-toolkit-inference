@@ -193,3 +193,106 @@ class TestKrea2GuidanceNormalization:
             cfg = get_pipeline_config(model_id)
             assert max(0.0, cfg.default_guidance_scale - 1.0) > 0.0
             assert cfg.supports_negative_prompt is True
+
+
+class TestKrea2ComfyModelOptions:
+    """The HTTP API and the ComfyUI nodes are two independent entry points.
+
+    Adding kv_cache / match_target_res to InferenceInput fixed only the HTTP
+    path; the ComfyUI nodes kept using the hardcoded class defaults, so an edit
+    adapter trained before ai-toolkit's 2026-07-16 preset change silently
+    produced wrong output through ComfyUI. These tests pin both halves.
+    """
+
+    def test_edit_nodes_expose_the_options(self):
+        from comfyui_nodes import NODE_CLASS_MAPPINGS
+
+        for node in ("RCKrea2Edit", "RCKrea2EditTurbo"):
+            spec = NODE_CLASS_MAPPINGS[node].INPUT_TYPES()
+            opt = spec["optional"]
+            for name in ("kv_cache", "match_target_res"):
+                assert name in opt, f"{node} does not expose {name}"
+                typ, cfg = opt[name]
+                assert typ == "BOOLEAN"
+                assert cfg["default"] is True, "default must follow the current preset"
+                assert cfg.get("tooltip"), f"{node}.{name} needs a tooltip"
+
+    def test_t2i_nodes_do_not_expose_them(self):
+        """They are meaningless without reference images -- do not clutter the UI."""
+        from comfyui_nodes import NODE_CLASS_MAPPINGS
+
+        for node in ("RCKrea2", "RCKrea2Turbo"):
+            opt = NODE_CLASS_MAPPINGS[node].INPUT_TYPES()["optional"]
+            assert "kv_cache" not in opt
+            assert "match_target_res" not in opt
+
+    def test_generate_forwards_options_to_the_pipeline(self):
+        """The node must actually call apply_model_options -- declaring the
+        inputs without wiring them is the exact bug this guards."""
+        from comfyui_nodes import NODE_CLASS_MAPPINGS
+
+        seen = {}
+
+        class FakePipe:
+            CONFIG = None
+
+            def apply_model_options(self, **opts):
+                seen.update(opts)
+                seen["_called"] = True
+
+            def generate(self, **kw):
+                from PIL import Image
+
+                return {"image": Image.new("RGB", (16, 16))}
+
+        node = NODE_CLASS_MAPPINGS["RCKrea2Edit"]()
+        import comfyui_nodes.rc_models as rc
+
+        orig = rc.get_or_load_pipeline
+        rc.get_or_load_pipeline = lambda **kw: FakePipe()
+        try:
+            node.generate(
+                prompt="x", width=1024, height=1024, sample_steps=8,
+                guidance_scale=4.0, seed=1, kv_cache=False, match_target_res=False,
+            )
+        finally:
+            rc.get_or_load_pipeline = orig
+
+        assert seen.get("_called"), "apply_model_options was never called"
+        assert seen["kv_cache"] is False
+        assert seen["match_target_res"] is False
+
+    def test_latent_workflow_generate_exposes_and_forwards(self):
+        from comfyui_nodes.rc_latent_workflow import RCAITKGenerate
+
+        opt = RCAITKGenerate.INPUT_TYPES()["optional"]
+        assert "kv_cache" in opt and "match_target_res" in opt
+
+        seen = {}
+
+        class FakePipe:
+            CONFIG = None
+
+            def apply_model_options(self, **o):
+                seen.update(o)
+
+            def generate(self, **kw):
+                from PIL import Image
+
+                return {"image": Image.new("RGB", (16, 16))}
+
+        RCAITKGenerate().generate(
+            pipe=FakePipe(), prompt="x", width=1024, height=1024, steps=8,
+            cfg=4.0, seed=1, kv_cache=False, match_target_res=False,
+        )
+        assert seen == {"kv_cache": False, "match_target_res": False}
+
+    def test_apply_model_options_is_safe_for_models_without_any(self):
+        """RCAITKGenerate calls it unconditionally, so every other pipeline
+        must tolerate the call."""
+        from src.pipelines import get_pipeline_class
+
+        for model_id in ("flux", "sdxl", "qwen_image", "ltx2", "wan22_5b"):
+            cls = get_pipeline_class(model_id)
+            inst = object.__new__(cls)
+            assert inst.apply_model_options(kv_cache=False, match_target_res=True) is None

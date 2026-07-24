@@ -12,11 +12,15 @@ Node categories use "RunComfy-Inference/Workflow" for consistency with ComfyUI.m
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import torch
 from PIL import Image
 
 from .rc_common import get_or_load_pipeline, comfy_to_pil_image, pil_frames_to_comfy_images, pil_to_comfy_image
+
+logger = logging.getLogger(__name__)
 
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
@@ -617,6 +621,8 @@ class RCAITKGenerate:
                 "control_image_3": ("IMAGE",),
                 "num_frames": ("INT", {"default": 41, "min": 1, "max": 201, "tooltip": "For video models only"}),
                 "fps": ("INT", {"default": 16, "min": 1, "max": 120, "tooltip": "For video models only"}),
+                "kv_cache": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.kv_cache -- it changes the reference attention mask, so a mismatch silently produces wrong output. Set false for adapters trained before 2026-07-16. Ignored by other models."}),
+                "match_target_res": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.match_target_res. Ignored by other models."}),
             },
         }
 
@@ -639,6 +645,8 @@ class RCAITKGenerate:
         control_image_3=None,
         num_frames: int = 41,
         fps: int = 16,
+        kv_cache: bool = True,
+        match_target_res: bool = True,
     ):
         # Convert control images from ComfyUI format to PIL
         ctrl_img = None
@@ -659,6 +667,16 @@ class RCAITKGenerate:
 
         # Check if this is a video model
         is_video = getattr(getattr(pipe, "CONFIG", None), "is_video", False)
+
+        # Model-specific options that must match how the LoRA was trained.
+        # BasePipeline.apply_model_options() is a no-op for models that declare
+        # none, so this is safe to call unconditionally.
+        try:
+            pipe.apply_model_options(
+                kv_cache=bool(kv_cache), match_target_res=bool(match_target_res)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to apply model options: {e}")
 
         # Comfy-native progress + interrupt
         from src.pipelines.comfy_callbacks import comfy_pipeline_observer

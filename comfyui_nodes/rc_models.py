@@ -83,6 +83,16 @@ class _RCAitkBase:
     DEFAULT_NUM_FRAMES: int = 41
     DEFAULT_FPS: int = 16
 
+    # Model-specific options surfaced as node inputs and handed to
+    # BasePipeline.apply_model_options() before generation. Maps input name ->
+    # (default, tooltip). Empty for models that declare none.
+    #
+    # These exist for settings that must match how the LoRA was TRAINED but
+    # cannot be read back from the adapter file. Without them, a ComfyUI user
+    # cannot run an adapter trained under different settings than the current
+    # class defaults -- the mismatch silently produces wrong output.
+    MODEL_OPTIONS: Dict[str, Tuple[bool, str]] = {}
+
     # pipeline loading - default offload mode for this model class
     DEFAULT_OFFLOAD_MODE: str = "none"
 
@@ -126,6 +136,10 @@ class _RCAitkBase:
         if cls.IS_VIDEO:
             opt["num_frames"] = ("INT", {"default": cls.DEFAULT_NUM_FRAMES, "min": 1, "max": 201})
             opt["fps"] = ("INT", {"default": cls.DEFAULT_FPS, "min": 1, "max": 120})
+
+        # model-specific options that must match the LoRA's training config
+        for name, (default, tooltip) in cls.MODEL_OPTIONS.items():
+            opt[name] = ("BOOLEAN", {"default": default, "tooltip": tooltip})
 
         return {"required": req, "optional": opt}
 
@@ -212,6 +226,19 @@ class _RCAitkBase:
             lora_paths=lora_paths,
             lora_scale=lora_scale_value,
         )
+
+        # Model-specific options that must match how the LoRA was trained.
+        # Called unconditionally: BasePipeline.apply_model_options() is a no-op
+        # by default, and it is authoritative for the whole option set, so an
+        # option left off here resets to the class default rather than leaking
+        # in from a previous run against the same cached pipeline.
+        model_options = {
+            name: bool(kwargs[name]) for name in self.MODEL_OPTIONS if name in kwargs
+        }
+        try:
+            pipe.apply_model_options(**model_options)
+        except Exception as e:
+            logger.warning(f"Failed to apply model options {model_options}: {e}")
 
         # Special-case FLUX.2: the underlying ai-toolkit pipeline expects prompt-like
         # inputs to be non-None and list-like (it may call len() directly).
@@ -724,6 +751,28 @@ class RCKrea2Turbo(_RCAitkBase):
         return Krea2TurboPipeline
 
 
+# Both edit nodes must let the user match the adapter's training config.
+# ai-toolkit's krea2 edit preset turned kv_cache/match_target_res on 2026-07-16;
+# adapters trained before that ran with both off, and the values are not
+# recorded in the LoRA file. kv_cache changes the attention mask, so a mismatch
+# silently produces wrong output rather than an error.
+_KREA2_EDIT_OPTIONS = {
+    "kv_cache": (
+        True,
+        "Must match the training config's model_kwargs.kv_cache. It changes the "
+        "reference attention mask, so a mismatch silently produces wrong output. "
+        "Default true matches the current ai-toolkit preset; set false for "
+        "adapters trained before 2026-07-16.",
+    ),
+    "match_target_res": (
+        True,
+        "Must match the training config's model_kwargs.match_target_res. True "
+        "area-matches each reference image to the target resolution; false only "
+        "caps it at 1 MP.",
+    ),
+}
+
+
 class RCKrea2Edit(_RCAitkBase):
     MODEL_ID = "krea2_o_edit"
     DISPLAY_NAME = "RC Krea 2 Edit"
@@ -732,6 +781,7 @@ class RCKrea2Edit(_RCAitkBase):
     DEFAULT_GUIDANCE = 4.0
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 3
+    MODEL_OPTIONS = _KREA2_EDIT_OPTIONS
 
     def _pipeline_ctor(self):
         from src.pipelines.krea2 import Krea2EditPipeline
@@ -747,6 +797,7 @@ class RCKrea2EditTurbo(_RCAitkBase):
     SUPPORTS_NEGATIVE = False
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 3
+    MODEL_OPTIONS = _KREA2_EDIT_OPTIONS
 
     def _pipeline_ctor(self):
         from src.pipelines.krea2 import Krea2EditTurboPipeline
