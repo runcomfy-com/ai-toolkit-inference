@@ -11,7 +11,12 @@ torchaudio
 
 torchao==0.10.0
 safetensors
-git+https://github.com/huggingface/diffusers@072d15ee4289ffdc3aa9d65f8b94bc9271319d21
+# Bumped 072d15ee (LTX-2.3, 2026-03-19) -> c943837 (2026-05-29) so the container
+# has the Anima modular pipeline (huggingface/diffusers#13732). c943837 is the
+# ai-toolkit training pin, already proven to host flux2/krea2/qwen_image/ltx2/
+# anima together. This is a SHARED dependency for every pipeline -- regression
+# test krea2/LTX-2.3/flux2/qwen_image on a GPU before releasing this bump.
+git+https://github.com/huggingface/diffusers@c943837899b16cbae2f619b8dd4f7bb6f07dd81a
 transformers==4.57.3
 lycoris-lora==1.8.3
 flatten_json

@@ -172,6 +172,7 @@ class RCAITKLoadPipeline:
         "krea2_turbo",
         "krea2_o_edit",
         "krea2_o_edit_turbo",
+        "anima",
         # Video models
         "ltx2",
         "ltx2.3",
@@ -261,6 +262,7 @@ class RCAITKLoadPipeline:
             "krea2_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2TurboPipeline"]).Krea2TurboPipeline,
             "krea2_o_edit": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditPipeline"]).Krea2EditPipeline,
             "krea2_o_edit_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditTurboPipeline"]).Krea2EditTurboPipeline,
+            "anima": lambda: __import__("src.pipelines.anima", fromlist=["AnimaPipeline"]).AnimaPipeline,
         }
 
         if pipeline not in ctor_map:

@@ -161,6 +161,13 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
             ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
         ],
     ),
+    # Anima
+    # circlestone-labs/Anima-Base-v1.0-Diffusers is a self-contained diffusers
+    # modular repo: every component (transformer, text_encoder Qwen3, tokenizer,
+    # t5_tokenizer, text_conditioner, vae) is a subfolder of this one repo
+    # (modular_model_index.json points every entry back at it), so a full-repo
+    # pull is correct -- no extras.
+    ModelType.ANIMA: DownloadConfig(),
 }
 
 

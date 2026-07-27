@@ -4,7 +4,7 @@
 
 Reference **Diffusers LoRA inference pipelines** (plus an optional HTTP server) for LoRAs trained with [ostris/ai-toolkit](https://github.com/ostris/ai-toolkit), designed to minimize **AI Toolkit training sample vs inference output drift** so your real inference outputs are consistent with the samples you validated during training, and remain reproducible across environments.
 
-Supports **35+ models** across image generation, editing, and video: FLUX.1/FLUX.2 (including FLUX.2-klein), Flex, SD/SDXL, Qwen Image (and Edit variants), Z-Image, Krea 2 (including Turbo and Edit), Wan 2.1/2.2, LTX-2/2.3, Chroma, HiDream, Lumina2, OmniGen2, and more.
+Supports **35+ models** across image generation, editing, and video: FLUX.1/FLUX.2 (including FLUX.2-klein), Flex, SD/SDXL, Qwen Image (and Edit variants), Z-Image, Krea 2 (including Turbo and Edit), Anima, Wan 2.1/2.2, LTX-2/2.3, Chroma, HiDream, Lumina2, OmniGen2, and more.
 
 <p>
   <a href="https://ai-toolkit-docs.runcomfy.com/">Docs Home</a> ·
@@ -42,6 +42,7 @@ Popular model docs (each page includes defaults + what commonly causes preview m
 - [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
 - [Z-Image Turbo LoRA inference (few-step defaults)](https://ai-toolkit-docs.runcomfy.com/models/zimage-turbo/) (`model="zimage_turbo"`)
 - [Krea 2 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/krea2/) (`model="krea2"`, plus `krea2_turbo` / `krea2_o_edit` / `krea2_o_edit_turbo`)
+- [Anima LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/anima/) (`model="anima"`)
 - [FLUX.2-dev LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2/) (`model="flux2"`)
 - [FLUX.2-klein 4B/9B LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2-klein-4b/) (`model="flux2_klein_4b"` / `flux2_klein_9b`)
 - [FLUX Kontext LoRA inference (control-image edit)](https://ai-toolkit-docs.runcomfy.com/models/flux-kontext/) (`model="flux_kontext"`)
@@ -206,7 +207,7 @@ pip install -r requirements-inference.txt
 
 ### ai-toolkit for extended models
 
-Some pipelines (FLUX.2, Chroma, HiDream, OmniGen2, Wan 2.2 I2V/5B, LTX-2, Krea 2) require custom classes from `ostris/ai-toolkit`.
+Some pipelines (FLUX.2, Chroma, HiDream, OmniGen2, Wan 2.2 I2V/5B, LTX-2, Krea 2, Anima) require custom classes from `ostris/ai-toolkit`.
 
 **Automatic setup (recommended):**
 

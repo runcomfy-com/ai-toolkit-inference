@@ -56,6 +56,7 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | [OmniGen2](omnigen2/) | `omnigen2` | `OmniGen2/OmniGen2` | Optional reference images (up to 3 via `ctrl_img(_1..3)`). Applies chat template for preview matching. |
 | [Krea 2](krea2/) | `krea2` | `krea/Krea-2-Raw` | Requires AI Toolkit. Gated weights (HF_TOKEN needed). `guidance_scale` is 0-normalized (`g-1` internally). LoRA merged at load. |
 | [Krea 2 Turbo](krea2-turbo/) | `krea2_turbo` | `krea/Krea-2-Turbo` | Step-distilled: defaults (9 steps / guidance 1.0) skip the uncond pass, so the negative prompt is inert. The training adapter is never loaded. |
+| [Anima](anima/) | `anima` | `circlestone-labs/Anima-Base-v1.0-Diffusers` | Cosmos-DiT via the Diffusers **modular** pipeline (needs Diffusers ≥ `c943837`). `guidance_scale` is **raw** (no `-1`, unlike Krea 2). Mirrors the trainer's embeds path + empty-prompt mask fix. LoRA fused at load. |
 
 ## Editing / control-image
 

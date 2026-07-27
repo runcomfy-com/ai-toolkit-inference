@@ -78,6 +78,9 @@ class ModelType(str, Enum):
     KREA2_O_EDIT = "krea2_o_edit"  # ai-toolkit arch: krea2:o_edit
     KREA2_O_EDIT_TURBO = "krea2_o_edit_turbo"  # ai-toolkit arch: krea2:o_edit_turbo
 
+    # Anima
+    ANIMA = "anima"  # ai-toolkit arch: anima (anima.json)
+
 
 def get_supported_models() -> list[str]:
     """Get list of all supported model type values."""

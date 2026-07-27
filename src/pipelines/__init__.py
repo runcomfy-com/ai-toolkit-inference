@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         Krea2EditPipeline,
         Krea2EditTurboPipeline,
     )
+    from .anima import AnimaPipeline
 
 
 # Lazy import mapping: attribute name -> (module_name, class_name)
@@ -111,6 +112,8 @@ _LAZY_IMPORTS = {
     "Krea2TurboPipeline": (".krea2", "Krea2TurboPipeline"),
     "Krea2EditPipeline": (".krea2", "Krea2EditPipeline"),
     "Krea2EditTurboPipeline": (".krea2", "Krea2EditTurboPipeline"),
+    # Anima
+    "AnimaPipeline": (".anima", "AnimaPipeline"),
 }
 
 # Cache for lazily loaded classes
@@ -166,6 +169,8 @@ _MODEL_TYPE_TO_CLASS = {
     ModelType.KREA2_TURBO: "Krea2TurboPipeline",
     ModelType.KREA2_O_EDIT: "Krea2EditPipeline",
     ModelType.KREA2_O_EDIT_TURBO: "Krea2EditTurboPipeline",
+    # Anima
+    ModelType.ANIMA: "AnimaPipeline",
 }
 
 
@@ -272,6 +277,8 @@ __all__ = [
     "Krea2TurboPipeline",
     "Krea2EditPipeline",
     "Krea2EditTurboPipeline",
+    # Anima
+    "AnimaPipeline",
     # Registry and helpers
     "get_pipeline_class",
     "get_pipeline_config",

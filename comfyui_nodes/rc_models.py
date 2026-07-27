@@ -802,3 +802,21 @@ class RCKrea2EditTurbo(_RCAitkBase):
     def _pipeline_ctor(self):
         from src.pipelines.krea2 import Krea2EditTurboPipeline
         return Krea2EditTurboPipeline
+
+
+# ===== Anima =====
+# Text-to-image. RESOLUTION_STEP must equal the pipeline's resolution_divisor
+# (32, the trainer's bucket divisibility), else the widget offers sizes the
+# server silently floors. Guidance is RAW (no -1), default 4.0 / 30 steps.
+
+
+class RCAnima(_RCAitkBase):
+    MODEL_ID = "anima"
+    DISPLAY_NAME = "RC Anima"
+    RESOLUTION_STEP = 32
+    DEFAULT_STEPS = 30
+    DEFAULT_GUIDANCE = 4.0
+
+    def _pipeline_ctor(self):
+        from src.pipelines.anima import AnimaPipeline
+        return AnimaPipeline
