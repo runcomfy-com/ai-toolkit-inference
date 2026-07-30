@@ -82,6 +82,10 @@ class _RCAitkBase:
     IS_VIDEO: bool = False
     DEFAULT_NUM_FRAMES: int = 41
     DEFAULT_FPS: int = 16
+    # When True, expose a base_model_path input so users can load weights from a local
+    # directory instead of downloading from Hugging Face (see issue #23). Only pipelines
+    # that honor base_model_path should set this.
+    SUPPORTS_LOCAL_MODEL_PATH: bool = False
 
     # Model-specific options surfaced as node inputs and handed to
     # BasePipeline.apply_model_options() before generation. Maps input name ->
@@ -116,6 +120,21 @@ class _RCAitkBase:
             "lora_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
             "hf_token": ("STRING", {"default": ""}),
         }
+
+        if cls.SUPPORTS_LOCAL_MODEL_PATH:
+            opt["base_model_path"] = (
+                "STRING",
+                {
+                    "default": "",
+                    "tooltip": (
+                        "Optional local directory for the BASE model weights, to avoid "
+                        "downloading them from Hugging Face. For FLUX.2/klein this overrides only "
+                        "the transformer (a folder with the .safetensors); VAE/text-encoder/"
+                        "tokenizer still come from HF. For from_pretrained models point it at a "
+                        "local diffusers snapshot. Leave empty to use the default HF repo."
+                    ),
+                },
+            )
 
         if cls.SUPPORTS_NEGATIVE:
             opt["negative_prompt"] = ("STRING", {"multiline": True, "default": ""})
@@ -218,11 +237,15 @@ class _RCAitkBase:
         # Get offload_mode from input or use class default
         offload_mode = kwargs.get("offload_mode", self.DEFAULT_OFFLOAD_MODE)
 
+        # Optional local model dir override (only exposed when SUPPORTS_LOCAL_MODEL_PATH).
+        base_model_path = (kwargs.get("base_model_path", "") or "").strip() or None
+
         pipe = get_or_load_pipeline(
             model_id=self.MODEL_ID,
             pipeline_ctor=self._pipeline_ctor(),
             offload_mode=offload_mode,
             hf_token=hf_token,
+            base_model_path=base_model_path,
             lora_paths=lora_paths,
             lora_scale=lora_scale_value,
         )
@@ -338,6 +361,7 @@ class RCZimage(_RCAitkBase):
     DEFAULT_STEPS = 30
     DEFAULT_GUIDANCE = 4.0
     RESOLUTION_STEP = 32
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage import ZImagePipeline
@@ -350,6 +374,7 @@ class RCZimageTurbo(_RCAitkBase):
     DEFAULT_STEPS = 8
     DEFAULT_GUIDANCE = 1.0
     RESOLUTION_STEP = 32
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.zimage_turbo import ZImageTurboPipeline
@@ -373,6 +398,7 @@ class RCFluxDev(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX.1-dev"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 4.0
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux_dev import FluxDevPipeline
@@ -384,6 +410,7 @@ class RCFluxKontext(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX Kontext"
     REQUIRES_CONTROL_IMAGE = True
     CONTROL_IMAGE_SLOTS = 1
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux_kontext import FluxKontextPipeline
@@ -395,6 +422,7 @@ class RCFlux2(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX.2"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 4.0
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -422,6 +450,7 @@ class RCFlux2Klein4B(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX.2-klein 4B"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 4.0
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux2_klein import Flux2Klein4BPipeline
@@ -433,6 +462,7 @@ class RCFlux2Klein9B(_RCAitkBase):
     DISPLAY_NAME = "RC FLUX.2-klein 9B"
     DEFAULT_STEPS = 25
     DEFAULT_GUIDANCE = 4.0
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flux2_klein import Flux2Klein9BPipeline
@@ -442,6 +472,7 @@ class RCFlux2Klein9B(_RCAitkBase):
 class RCFlex1(_RCAitkBase):
     MODEL_ID = "flex1"
     DISPLAY_NAME = "RC Flex.1-alpha"
+    SUPPORTS_LOCAL_MODEL_PATH = True
 
     def _pipeline_ctor(self):
         from src.pipelines.flex1_alpha import Flex1AlphaPipeline

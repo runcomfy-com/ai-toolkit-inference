@@ -32,7 +32,7 @@ class FluxKontextPipeline(BasePipeline):
     def _load_pipeline(self):
         """Load FLUX Kontext pipeline."""
         self.pipe = DiffusersFluxKontextPipeline.from_pretrained(
-            self.CONFIG.base_model,
+            self._resolve_base_model_source(),
             torch_dtype=self.dtype,
             token=self.hf_token,
         )

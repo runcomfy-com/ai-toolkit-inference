@@ -140,6 +140,7 @@ class BasePipeline(ABC):
         device: str = "cuda",
         offload_mode: OffloadMode = "model",
         hf_token: Optional[str] = None,
+        base_model_path: Optional[str] = None,
     ):
         if self.CONFIG is None:
             raise NotImplementedError(f"{self.__class__.__name__} must define CONFIG class attribute")
@@ -147,6 +148,10 @@ class BasePipeline(ABC):
         self.device = device
         self.hf_token = hf_token
         self.offload_mode: OffloadMode = offload_mode
+        # Optional override for the base model source. When set to a local directory, the
+        # pipeline loads weights from disk instead of downloading from Hugging Face. Not all
+        # pipelines honor this yet (currently FLUX.2 / FLUX.2-klein).
+        self.base_model_path: Optional[str] = base_model_path or None
 
         self.pipe = None
         self.lora_loaded = False
@@ -156,6 +161,19 @@ class BasePipeline(ABC):
         self._current_lora_paths: List[str] = []  # Track currently loaded LoRA paths
         self._lora_fused: bool = False  # Track if LoRA is fused into model weights
         self._num_loras_fused: int = 0  # Track number of LoRAs fused (for unfuse reliability check)
+
+    def _resolve_base_model_source(self) -> str:
+        """Return the base-model source: the local override dir if set, else the HF repo id.
+
+        ``from_pretrained``-style loaders accept either a Hugging Face repo id or a local
+        directory, so a pipeline can pass this straight through to load weights from disk
+        instead of downloading (see issue #23). Single-file loaders should additionally route
+        the result through their own per-file resolver.
+        """
+        if self.base_model_path:
+            logger.info(f"Using local base_model_path override: {self.base_model_path} (instead of {self.CONFIG.base_model})")
+            return self.base_model_path
+        return self.CONFIG.base_model
 
     @staticmethod
     def _default_dtype_for_device(device: str) -> torch.dtype:

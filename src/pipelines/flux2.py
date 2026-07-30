@@ -6,26 +6,69 @@ This version adds minimal changes for LoRA switching while keeping
 the exact same inference behavior as the original.
 """
 
+import gc
+import glob
+import logging
 import os
 import sys
-import gc
-import logging
-from typing import Dict, Any, Optional
+import threading
+import time
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Optional
 
 import torch
 from PIL import Image
 
-from .base import BasePipeline, PipelineConfig, LoraMergeMethod
-from ..schemas.models import ModelType
 from ..config import settings
+from ..schemas.models import ModelType
+from .base import BasePipeline, LoraMergeMethod, PipelineConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_file_info(path: Optional[str]) -> str:
+    """Return non-secret file diagnostics for logs."""
+    if not path:
+        return "path=<none>"
+    try:
+        stat = os.stat(path)
+        return f"path={path} exists=True size_bytes={stat.st_size}"
+    except FileNotFoundError:
+        return f"path={path} exists=False"
+    except OSError as exc:
+        return f"path={path} stat_error={type(exc).__name__}: {exc}"
+
+
+@contextmanager
+def _timed_step(name: str):
+    start = time.perf_counter()
+    logger.info(f"[FLUX2_LOAD] {name} START")
+    try:
+        yield
+    except Exception:
+        logger.exception(f"[FLUX2_LOAD] {name} FAILED after {time.perf_counter() - start:.3f}s")
+        raise
+    else:
+        logger.info(f"[FLUX2_LOAD] {name} END elapsed={time.perf_counter() - start:.3f}s")
 
 # Environment variable to enable aggressive memory cleanup (default: off for faster iterative runs)
 AITK_AGGRESSIVE_CLEANUP = os.environ.get("AITK_AGGRESSIVE_CLEANUP", "").lower() in ("1", "true", "yes")
 # Opt-in: keep a full CPU snapshot of transformer weights for fast LoRA switching.
 # Default off to avoid duplicating RAM.
 AITK_FLUX2_HOTSWAP = os.environ.get("AITK_FLUX2_HOTSWAP", "").lower() in ("1", "true", "yes")
+
+# --- HF download observability (issue #23) -----------------------------------
+# hf_hub_download exposes no progress callback and its tqdm bar is swallowed in the
+# RunComfy/ComfyUI server context, so a frozen multi-GB download looks identical to a slow
+# one in our logs. We watch the on-disk *.incomplete blob from a side thread and log
+# throughput, a STALLED line, and a finalizing line so a hang is distinguishable from
+# progress. This is observability only — it never aborts, retries, or moves files.
+AITK_HF_PROGRESS = os.environ.get("AITK_HF_PROGRESS", "1").lower() not in ("0", "false", "no")
+# Seconds between progress samples.
+AITK_HF_PROGRESS_INTERVAL = float(os.environ.get("AITK_HF_PROGRESS_INTERVAL", "5"))
+# Below this throughput a sample counts as "no progress"; N consecutive samples -> STALLED.
+AITK_HF_STALL_MB_PER_S = float(os.environ.get("AITK_HF_STALL_MB_PER_S", "0.5"))
+AITK_HF_STALL_TICKS = int(os.environ.get("AITK_HF_STALL_TICKS", "3"))
 
 
 def _maybe_cleanup() -> None:
@@ -35,6 +78,172 @@ def _maybe_cleanup() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _hf_blobs_dir(cache_dir: str, repo_id: str) -> str:
+    """Path to the blobs/ dir where huggingface_hub streams *.incomplete files for a repo."""
+    return os.path.join(cache_dir, "models--" + repo_id.replace("/", "--"), "blobs")
+
+
+def _watch_hf_download(
+    stop_event: "threading.Event",
+    blobs_dir: str,
+    repo_id: str,
+    total_bytes: Optional[int],
+    interval: float,
+    log: Callable[[str], None],
+    incomplete_path: Optional[str] = None,
+) -> None:
+    """Poll this file's *.incomplete blob and log progress / stall / finalizing.
+
+    Observability only: it logs what the download is doing and never aborts it, retries, or
+    touches any files. When ``incomplete_path`` (``blobs/<etag>.incomplete`` for the exact
+    file) is known it watches only that blob, so a healthy sibling download in the same repo
+    can't be mistaken for this one's progress; otherwise it falls back to the largest
+    *.incomplete. A blob that reaches its expected size is reported as finalizing
+    (hf_hub_download verifying/moving into cache), distinct from a network stall.
+    """
+    total_str = f"{total_bytes / 1e9:.2f}GB" if total_bytes else "?GB"
+    last_size, last_t, stalled = 0, time.perf_counter(), 0
+    finalize_start: Optional[float] = None
+    last_finalize_log = 0.0
+    while not stop_event.wait(interval):
+        try:
+            if incomplete_path is not None:
+                if not os.path.isfile(incomplete_path):
+                    continue
+                blob_path = incomplete_path
+            else:
+                incompletes = glob.glob(os.path.join(blobs_dir, "*.incomplete"))
+                if not incompletes:
+                    continue
+                blob_path = max(incompletes, key=os.path.getsize)
+            size = os.path.getsize(blob_path)
+        except OSError:
+            continue
+        now = time.perf_counter()
+        dt = now - last_t
+        speed = (size - last_size) / dt / 1e6 if dt > 0 else 0.0
+        pct = f"{size / total_bytes * 100:.1f}%" if total_bytes else "?%"
+
+        # Bytes fully on disk but hf_hub_download hasn't returned: it's finalizing (verifying /
+        # moving the blob into the cache, or a hung Xet reconstruction), NOT a dropped
+        # connection. 0 MB/s here is expected, so this is reported as finalizing, not a stall.
+        if total_bytes and size >= total_bytes * 0.999:
+            stalled = 0
+            if finalize_start is None:
+                finalize_start = now
+                last_finalize_log = now
+                log(
+                    f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} "
+                    f"bytes_complete={size / 1e9:.2f}GB/{total_str}; hf_hub_download is "
+                    f"verifying/moving the file into the cache (not a network stall)"
+                )
+            elif now - last_finalize_log >= 30:
+                log(
+                    f"[FLUX2_LOAD] hf_download_finalizing repo_id={repo_id} "
+                    f"still finalizing ~{int(now - finalize_start)}s"
+                )
+                last_finalize_log = now
+            last_size, last_t = size, now
+            continue
+
+        log(
+            f"[FLUX2_LOAD] hf_download_progress repo_id={repo_id} "
+            f"{size / 1e9:.2f}GB/{total_str} ({pct}) {speed:.1f}MB/s"
+        )
+        # Don't count the first sample as a stall (no prior baseline to compare against).
+        if last_size and speed < AITK_HF_STALL_MB_PER_S:
+            stalled += 1
+            if stalled >= AITK_HF_STALL_TICKS:
+                log(
+                    f"[FLUX2_LOAD] hf_download_STALLED repo_id={repo_id} "
+                    f"no_progress_for~{int(stalled * interval)}s at {size / 1e9:.2f}GB/{total_str} "
+                    f"(connection likely dropped/throttled)"
+                )
+        else:
+            stalled = 0
+        last_size, last_t = size, now
+
+
+@contextmanager
+def _hf_download_progress(repo_id: str, filename: str, token: Optional[str], interval: float = AITK_HF_PROGRESS_INTERVAL):
+    """Run a passive progress watcher for the duration of an hf_hub_download call.
+
+    No-op when AITK_HF_PROGRESS is disabled. Resolves the file size + etag up front (both
+    best-effort) so the watcher can report a percentage and watch the exact blob. Logging
+    only — it does not abort, retry, or otherwise change the download.
+    """
+    if not AITK_HF_PROGRESS:
+        yield
+        return
+
+    import huggingface_hub
+
+    total_bytes: Optional[int] = None
+    etag: Optional[str] = None
+    try:
+        meta = huggingface_hub.get_hf_file_metadata(
+            huggingface_hub.hf_hub_url(repo_id, filename), token=token
+        )
+        total_bytes, etag = meta.size, meta.etag
+    except Exception as exc:  # network/auth/etc — degrade to no-percentage progress
+        logger.info(f"[FLUX2_LOAD] hf_download_progress size_lookup_failed {type(exc).__name__}: {exc}")
+
+    try:
+        cache_dir = huggingface_hub.constants.HF_HUB_CACHE
+    except Exception:
+        cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+
+    blobs_dir = _hf_blobs_dir(cache_dir, repo_id)
+    # Watch this file's exact blob (blobs/<etag>.incomplete) when the etag is known, so a
+    # sibling download in the same repo can't be mistaken for this one's progress.
+    incomplete_path = os.path.join(blobs_dir, f"{etag}.incomplete") if etag else None
+    logger.info(
+        f"[FLUX2_LOAD] hf_cache blobs_dir={blobs_dir} "
+        f"incomplete={os.path.basename(incomplete_path) if incomplete_path else '?'}"
+    )
+
+    stop_event = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_hf_download,
+        args=(stop_event, blobs_dir, repo_id, total_bytes, interval, logger.info, incomplete_path),
+        name=f"hf-dl-watch-{filename}",
+        daemon=True,
+    )
+    watcher.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        watcher.join(timeout=interval + 1.0)
+
+
+def _resolve_model_file(repo_or_path: str, filename: str, token: Optional[str], label: str) -> str:
+    """Resolve a weight file to a local path.
+
+    If ``repo_or_path`` is a local directory, load ``<dir>/<filename>`` directly and skip the
+    download (the issue #23 manual workaround). Otherwise treat it as an HF repo id and
+    download it, with the passive progress/stall watcher logging alongside.
+    """
+    if os.path.isdir(repo_or_path):
+        local_file = os.path.join(repo_or_path, filename)
+        if not os.path.isfile(local_file):
+            raise FileNotFoundError(
+                f"{label}: '{filename}' not found in local model dir '{repo_or_path}' "
+                f"(expected {local_file})"
+            )
+        logger.info(f"[FLUX2_LOAD] {label} using local file, skipping HF download: {_safe_file_info(local_file)}")
+        return local_file
+
+    import huggingface_hub
+
+    logger.info(
+        f"[FLUX2_LOAD] {label} hf_hub_download repo_id={repo_or_path} "
+        f"filename={filename} token_present={bool(token)}"
+    )
+    with _hf_download_progress(repo_or_path, filename, token):
+        return huggingface_hub.hf_hub_download(repo_id=repo_or_path, filename=filename, token=token)
 
 
 # Scheduler config from ai-toolkit
@@ -112,10 +321,14 @@ class Flux2Pipeline(BasePipeline):
 
     def _load_pipeline(self):
         """Load FLUX.2 pipeline using ai-toolkit components."""
-        import time
-
+        total_start = time.perf_counter()
         logger.info(
-            f">>> _load_pipeline() START: self._lora_path={self._lora_path}, self._lora_scale={self._lora_scale}"
+            f">>> _load_pipeline() START: self._lora_path={self._lora_path}, "
+            f"self._lora_scale={self._lora_scale}, device={self.device}, dtype={self.dtype}, "
+            f"base_model={self.CONFIG.base_model}, base_model_path_override={self.base_model_path!r}, "
+            f"transformer_file={self.TRANSFORMER_FILENAME}, "
+            f"text_encoder={self.TEXT_ENCODER_REPO}, text_encoder_type={self.TEXT_ENCODER_TYPE}, "
+            f"vae_repo={self.VAE_REPO or self.CONFIG.base_model}, hf_token_present={bool(self.hf_token)}"
         )
 
         # Reset timings
@@ -123,49 +336,66 @@ class Flux2Pipeline(BasePipeline):
 
         # Add ai-toolkit to path (configurable via AI_TOOLKIT_PATH env var)
         ai_toolkit_path = settings.ai_toolkit_path
+        logger.info(
+            f"[FLUX2_LOAD] ai_toolkit_path={ai_toolkit_path} "
+            f"exists={os.path.exists(ai_toolkit_path)} in_sys_path={ai_toolkit_path in sys.path}"
+        )
         if os.path.exists(ai_toolkit_path) and ai_toolkit_path not in sys.path:
             sys.path.insert(0, ai_toolkit_path)
+            logger.info("[FLUX2_LOAD] inserted ai_toolkit_path into sys.path")
 
         try:
-            from safetensors.torch import load_file
-            import huggingface_hub
+            with _timed_step("import_dependencies"):
+                # huggingface_hub is imported lazily by _resolve_model_file / _hf_download_progress.
+                from safetensors.torch import load_file
 
-            # Try to import ai-toolkit components
-            try:
-                from extensions_built_in.diffusion_models.flux2.src.pipeline import Flux2Pipeline as AITKFlux2Pipeline
-                from extensions_built_in.diffusion_models.flux2.src.model import Flux2
-                from extensions_built_in.diffusion_models.flux2.src.autoencoder import AutoEncoder, AutoEncoderParams
-                from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
-                from toolkit.util.quantize import quantize, get_qtype
-                from optimum.quanto import freeze
-            except ImportError:
-                raise ImportError(
-                    f"FLUX.2 requires ai-toolkit. Please ensure AI_TOOLKIT_PATH ({ai_toolkit_path}) is valid."
-                )
+                # Try to import ai-toolkit components
+                try:
+                    from extensions_built_in.diffusion_models.flux2.src.autoencoder import (
+                        AutoEncoder,
+                        AutoEncoderParams,
+                    )
+                    from extensions_built_in.diffusion_models.flux2.src.model import Flux2
+                    from extensions_built_in.diffusion_models.flux2.src.pipeline import (
+                        Flux2Pipeline as AITKFlux2Pipeline,
+                    )
+                    from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+                except ImportError:
+                    raise ImportError(
+                        f"FLUX.2 requires ai-toolkit. Please ensure AI_TOOLKIT_PATH ({ai_toolkit_path}) is valid."
+                    )
 
             # Clear GPU memory before loading
-            _maybe_cleanup()
+            with _timed_step("pre_load_cleanup"):
+                _maybe_cleanup()
 
-            base_model_path = self.CONFIG.base_model
+            # Honor an optional local model dir override (issue #23). When base_model_path is a
+            # local directory, transformer/VAE weights load from disk instead of downloading.
+            base_model_path = self._resolve_base_model_source()
 
             # 1. Load Transformer
             t_start = time.perf_counter()
             logger.info("Loading FLUX.2 Transformer")
-            with torch.device("meta"):
-                transformer = Flux2(self._get_flux2_params())
+            with _timed_step("transformer_init_meta"):
+                with torch.device("meta"):
+                    transformer = Flux2(self._get_flux2_params())
 
-            # Download transformer weights
+            # Download transformer weights (or load from the local override dir)
             transformer_filename = self.TRANSFORMER_FILENAME
-            transformer_path = huggingface_hub.hf_hub_download(
-                repo_id=base_model_path,
-                filename=transformer_filename,
-                token=self.hf_token,
-            )
+            with _timed_step("transformer_hf_hub_download"):
+                transformer_path = _resolve_model_file(
+                    base_model_path, transformer_filename, self.hf_token, "transformer"
+                )
+                logger.info(f"[FLUX2_LOAD] transformer_file {_safe_file_info(transformer_path)}")
 
-            state_dict = load_file(transformer_path, device="cpu")
-            for key in state_dict:
-                state_dict[key] = state_dict[key].to(self.dtype)
-            transformer.load_state_dict(state_dict, assign=True)
+            with _timed_step("transformer_safetensors_load_cpu"):
+                state_dict = load_file(transformer_path, device="cpu")
+                logger.info(f"[FLUX2_LOAD] transformer_state_dict_keys={len(state_dict)}")
+            with _timed_step("transformer_cast_dtype"):
+                for key in state_dict:
+                    state_dict[key] = state_dict[key].to(self.dtype)
+            with _timed_step("transformer_load_state_dict"):
+                transformer.load_state_dict(state_dict, assign=True)
             self.timings["load_transformer"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_transformer: {self.timings['load_transformer']:.3f}s")
 
@@ -190,8 +420,9 @@ class Flux2Pipeline(BasePipeline):
                 f"LoRA check: lora_path={self._lora_path}, exists={os.path.exists(self._lora_path) if self._lora_path else 'N/A'}"
             )
             if self._lora_path and os.path.exists(self._lora_path):
-                logger.info(f"Loading and merging LoRA: {self._lora_path} with scale={self._lora_scale}")
-                self._merge_adapter_to_transformer(transformer, self._lora_path, self._lora_scale)
+                logger.info(f"Loading and merging LoRA: {_safe_file_info(self._lora_path)} with scale={self._lora_scale}")
+                with _timed_step("lora_merge_total"):
+                    self._merge_adapter_to_transformer(transformer, self._lora_path, self._lora_scale)
             elif self._lora_path:
                 logger.error(f"LoRA file not found: {self._lora_path}")
             else:
@@ -200,39 +431,46 @@ class Flux2Pipeline(BasePipeline):
             logger.info(f"[TIMING] merge_lora: {self.timings['merge_lora']:.3f}s")
 
             t_start = time.perf_counter()
-            transformer.to(self.device, dtype=self.dtype)
-            transformer.eval()
+            with _timed_step("transformer_to_device"):
+                transformer.to(self.device, dtype=self.dtype)
+                transformer.eval()
             self.timings["transformer_to_gpu"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] transformer_to_gpu: {self.timings['transformer_to_gpu']:.3f}s")
 
             # Clear memory after transformer load
-            _maybe_cleanup()
+            with _timed_step("post_transformer_cleanup"):
+                _maybe_cleanup()
 
             # 3. Load VAE
             t_start = time.perf_counter()
             logger.info("Loading FLUX.2 VAE")
-            with torch.device("meta"):
-                vae = AutoEncoder(AutoEncoderParams())
+            with _timed_step("vae_init_meta"):
+                with torch.device("meta"):
+                    vae = AutoEncoder(AutoEncoderParams())
 
             vae_filename = "ae.safetensors"
             vae_repo = self.VAE_REPO or base_model_path
-            vae_path = huggingface_hub.hf_hub_download(
-                repo_id=vae_repo,
-                filename=vae_filename,
-                token=self.hf_token,
-            )
+            with _timed_step("vae_hf_hub_download"):
+                vae_path = _resolve_model_file(vae_repo, vae_filename, self.hf_token, "vae")
+                logger.info(f"[FLUX2_LOAD] vae_file {_safe_file_info(vae_path)}")
 
-            vae_state_dict = load_file(vae_path, device="cpu")
-            for key in vae_state_dict:
-                vae_state_dict[key] = vae_state_dict[key].to(self.dtype)
-            vae.load_state_dict(vae_state_dict, assign=True)
-            vae.to(self.device, dtype=self.dtype)
-            vae.eval()
+            with _timed_step("vae_safetensors_load_cpu"):
+                vae_state_dict = load_file(vae_path, device="cpu")
+                logger.info(f"[FLUX2_LOAD] vae_state_dict_keys={len(vae_state_dict)}")
+            with _timed_step("vae_cast_dtype"):
+                for key in vae_state_dict:
+                    vae_state_dict[key] = vae_state_dict[key].to(self.dtype)
+            with _timed_step("vae_load_state_dict"):
+                vae.load_state_dict(vae_state_dict, assign=True)
+            with _timed_step("vae_to_device"):
+                vae.to(self.device, dtype=self.dtype)
+                vae.eval()
             self.timings["load_vae"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] load_vae: {self.timings['load_vae']:.3f}s")
 
             # Clear memory after VAE load
-            _maybe_cleanup()
+            with _timed_step("post_vae_cleanup"):
+                _maybe_cleanup()
 
             # 4. Load Text Encoder
             t_start = time.perf_counter()
@@ -240,20 +478,22 @@ class Flux2Pipeline(BasePipeline):
                 from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
                 logger.info(f"Loading Mistral Text Encoder: {self.TEXT_ENCODER_REPO}")
-                text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    torch_dtype=self.dtype,
-                    token=self.hf_token,
-                )
+                with _timed_step("mistral_text_encoder_from_pretrained"):
+                    text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        torch_dtype=self.dtype,
+                        token=self.hf_token,
+                    )
             elif self.TEXT_ENCODER_TYPE == "qwen":
                 from transformers import Qwen3ForCausalLM
 
                 logger.info(f"Loading Qwen3 Text Encoder: {self.TEXT_ENCODER_REPO}")
-                text_encoder = Qwen3ForCausalLM.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    torch_dtype=self.dtype,
-                    token=self.hf_token,
-                )
+                with _timed_step("qwen_text_encoder_from_pretrained"):
+                    text_encoder = Qwen3ForCausalLM.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        torch_dtype=self.dtype,
+                        token=self.hf_token,
+                    )
             else:
                 raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
             self.timings["load_text_encoder"] = time.perf_counter() - t_start
@@ -267,8 +507,9 @@ class Flux2Pipeline(BasePipeline):
             # quantize(text_encoder, weights=qtype)
             # freeze(text_encoder)
 
-            text_encoder.to(self.device)
-            text_encoder.eval()
+            with _timed_step("text_encoder_to_device"):
+                text_encoder.to(self.device)
+                text_encoder.eval()
             self.timings["text_encoder"] = time.perf_counter() - t_start
             logger.info(f"[TIMING] text_encoder: {self.timings['text_encoder']:.3f}s")
 
@@ -276,46 +517,51 @@ class Flux2Pipeline(BasePipeline):
             if self.TEXT_ENCODER_TYPE == "mistral":
                 from transformers import AutoProcessor
 
-                tokenizer = AutoProcessor.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    token=self.hf_token,
-                )
+                with _timed_step("mistral_tokenizer_from_pretrained"):
+                    tokenizer = AutoProcessor.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        token=self.hf_token,
+                    )
             elif self.TEXT_ENCODER_TYPE == "qwen":
                 from transformers import Qwen2Tokenizer
 
-                tokenizer = Qwen2Tokenizer.from_pretrained(
-                    self.TEXT_ENCODER_REPO,
-                    token=self.hf_token,
-                )
+                with _timed_step("qwen_tokenizer_from_pretrained"):
+                    tokenizer = Qwen2Tokenizer.from_pretrained(
+                        self.TEXT_ENCODER_REPO,
+                        token=self.hf_token,
+                    )
             else:
                 raise ValueError(f"Unsupported text encoder type: {self.TEXT_ENCODER_TYPE}")
 
             # 7. Create Scheduler
-            scheduler = CustomFlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER_CONFIG)
+            with _timed_step("scheduler_create"):
+                scheduler = CustomFlowMatchEulerDiscreteScheduler(**FLUX2_SCHEDULER_CONFIG)
 
             # 8. Create Pipeline
             logger.info("Creating FLUX.2 Pipeline")
-            self.pipe = AITKFlux2Pipeline(
-                scheduler=scheduler,
-                vae=vae,
-                text_encoder=text_encoder,
-                tokenizer=tokenizer,
-                transformer=transformer,
-                text_encoder_type=self.TEXT_ENCODER_TYPE,
-                is_guidance_distilled=self.IS_GUIDANCE_DISTILLED,
-            )
+            with _timed_step("aitk_pipeline_create"):
+                self.pipe = AITKFlux2Pipeline(
+                    scheduler=scheduler,
+                    vae=vae,
+                    text_encoder=text_encoder,
+                    tokenizer=tokenizer,
+                    transformer=transformer,
+                    text_encoder_type=self.TEXT_ENCODER_TYPE,
+                    is_guidance_distilled=self.IS_GUIDANCE_DISTILLED,
+                )
 
             self.transformer = transformer
             self.vae = vae
             self.text_encoder = text_encoder
             self.tokenizer = tokenizer
 
-            _maybe_cleanup()
+            with _timed_step("post_pipeline_cleanup"):
+                _maybe_cleanup()
 
-            logger.info("FLUX.2 pipeline loaded successfully")
+            logger.info(f"FLUX.2 pipeline loaded successfully total_elapsed={time.perf_counter() - total_start:.3f}s timings={self.timings}")
 
         except Exception as e:
-            logger.error(f"Failed to load FLUX.2 pipeline: {e}")
+            logger.error(f"Failed to load FLUX.2 pipeline after {time.perf_counter() - total_start:.3f}s: {e}")
             raise
 
     def _merge_adapter_to_transformer(self, transformer, lora_path: str, lora_scale: float = 1.0):
@@ -343,23 +589,27 @@ class Flux2Pipeline(BasePipeline):
         logger.info(f"Adapter merge device: {param_device}")
         # TODO: If OOMs appear in smaller GPUs, consider chunked merge or reintroduce periodic cache clears behind a flag.
 
-        lora_state_dict = load_file(lora_path, device="cpu")
+        logger.info(f"Adapter file info: {_safe_file_info(lora_path)}")
+        with _timed_step("adapter_safetensors_load_cpu"):
+            lora_state_dict = load_file(lora_path, device="cpu")
         logger.info(f"Loaded adapter file with {len(lora_state_dict)} keys")
 
         lora_keys_sample = list(lora_state_dict.keys())[:5]
         logger.info(f"Sample adapter keys (before conversion): {lora_keys_sample}")
 
         # Remove diffusion_model. prefix
-        converted_sd = {}
-        for key, value in lora_state_dict.items():
-            new_key = key.replace("diffusion_model.", "")
-            converted_sd[new_key] = value.to(self.dtype)
+        with _timed_step("adapter_key_convert_and_cast"):
+            converted_sd = {}
+            for key, value in lora_state_dict.items():
+                new_key = key.replace("diffusion_model.", "")
+                converted_sd[new_key] = value.to(self.dtype)
 
         # Move tensors to merge device once (avoid per-layer CPU->GPU transfers)
         if param_device.type == "cuda":
-            for key, value in converted_sd.items():
-                if isinstance(value, torch.Tensor) and value.device.type != "cuda":
-                    converted_sd[key] = value.to(device=param_device, dtype=self.dtype, non_blocking=True)
+            with _timed_step("adapter_tensors_to_merge_device"):
+                for key, value in converted_sd.items():
+                    if isinstance(value, torch.Tensor) and value.device.type != "cuda":
+                        converted_sd[key] = value.to(device=param_device, dtype=self.dtype, non_blocking=True)
 
         converted_keys_sample = list(converted_sd.keys())[:5]
         logger.info(f"Sample adapter keys (after conversion): {converted_keys_sample}")
@@ -394,6 +644,7 @@ class Flux2Pipeline(BasePipeline):
         # Manual merge (GPU-friendly): W += scale * (B @ A)
         transformer_state = transformer.state_dict()
         merged_count = 0
+        merge_start = time.perf_counter()
         for key in list(converted_sd.keys()):
             if "lora_A.weight" in key:
                 base_key = key.replace(".lora_A.weight", "")
@@ -428,8 +679,12 @@ class Flux2Pipeline(BasePipeline):
                         merged_count += 1
 
 
-        transformer.load_state_dict(transformer_state, assign=True)
-        logger.info(f"Merged {merged_count} LoRA layers with scale={lora_scale}")
+        with _timed_step("adapter_load_merged_state_dict"):
+            transformer.load_state_dict(transformer_state, assign=True)
+        logger.info(
+            f"Merged {merged_count} LoRA layers with scale={lora_scale} "
+            f"in {time.perf_counter() - merge_start:.3f}s"
+        )
 
     def _merge_lokr_to_transformer(self, transformer, converted_sd, lora_scale: float = 1.0):
         """Merge LoKR (Low-Rank Kronecker product) adapter weights into transformer.

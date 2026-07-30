@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
@@ -69,6 +70,30 @@ def pil_frames_to_comfy_images(frames: List[Image.Image]) -> torch.Tensor:
     return torch.from_numpy(batch)
 
 
+
+def _safe_lora_summary(lora_paths: List[Union[str, Dict[str, str]]]) -> List[Union[str, Dict[str, str]]]:
+    """Summarize LoRA paths without logging raw external/signed URLs."""
+    def summarize(value: str) -> str:
+        if not value:
+            return "<empty>"
+        text = str(value)
+        if text.startswith(("http://", "https://")):
+            return "<url>"
+        try:
+            exists = os.path.exists(text)
+            size = os.path.getsize(text) if exists else None
+            return f"{text} exists={exists}" + (f" size_bytes={size}" if size is not None else "")
+        except OSError as exc:
+            return f"{text} stat_error={type(exc).__name__}"
+
+    summary: List[Union[str, Dict[str, str]]] = []
+    for item in lora_paths or []:
+        if isinstance(item, dict):
+            summary.append({k: summarize(v) for k, v in item.items()})
+        else:
+            summary.append(summarize(item))
+    return summary
+
 def _normalize_lora_paths_for_cache(lora_paths: List[Union[str, Dict[str, str]]]) -> Tuple:
     """Turn lora_paths into a hashable key.
 
@@ -110,7 +135,7 @@ def _maybe_download_lora_paths(lora_paths: List[Union[str, Dict[str, str]]]) -> 
         return []
 
     try:
-        from src.services.pipeline_manager import is_url, _download_lora_from_url  # type: ignore
+        from src.services.pipeline_manager import _download_lora_from_url, is_url  # type: ignore
     except Exception:
         return lora_paths
 
@@ -136,6 +161,7 @@ class PipelineCacheKey:
     pipeline_id: str  # e.g. "module:ClassName" to distinguish different pipeline classes
     offload_mode: OffloadMode  # CPU offload strategy (none/model/sequential)
     hf_token: Optional[str]
+    base_model_path: Optional[str]  # local model dir override (None = default HF repo)
     lora_paths_key: Tuple
     lora_scale_key: Union[float, Tuple[Tuple[str, float], ...]]
 
@@ -145,6 +171,23 @@ def _get_pipeline_id(pipeline_ctor) -> str:
     if hasattr(pipeline_ctor, "__module__") and hasattr(pipeline_ctor, "__name__"):
         return f"{pipeline_ctor.__module__}:{pipeline_ctor.__name__}"
     return str(pipeline_ctor)
+
+
+def _safe_cache_key_summary(key: Optional["PipelineCacheKey"]) -> str:
+    """Summarize a pipeline cache key without logging token-bearing fields."""
+    if key is None:
+        return "<none>"
+    return (
+        "PipelineCacheKey("
+        f"model_id={key.model_id!r}, "
+        f"pipeline_id={key.pipeline_id!r}, "
+        f"offload_mode={key.offload_mode!r}, "
+        f"hf_token_present={bool(key.hf_token)}, "
+        f"base_model_path={key.base_model_path!r}, "
+        f"lora_paths_key={key.lora_paths_key!r}, "
+        f"lora_scale_key={key.lora_scale_key!r}"
+        ")"
+    )
 
 
 _PIPELINE_CACHE: Dict[str, Any] = {
@@ -159,24 +202,42 @@ def get_or_load_pipeline(
     pipeline_ctor,
     offload_mode: OffloadMode = "model",
     hf_token: Optional[str],
+    base_model_path: Optional[str] = None,
     lora_paths: List[Union[str, Dict[str, str]]],
     lora_scale: Union[float, Dict[str, float]],
 ) -> Any:
     """Load and cache a single pipeline instance.
 
-    If model/token/lora/pipeline_class/offload_mode changes, unload old pipeline and load new.
+    If model/token/lora/pipeline_class/offload_mode/base_model_path changes, unload old
+    pipeline and load new.
 
     Args:
         model_id: Model identifier for cache key
         pipeline_ctor: Pipeline class constructor
         offload_mode: CPU offload strategy ("none", "model", "sequential")
         hf_token: HuggingFace token for gated models
+        base_model_path: Optional local model dir to load from instead of the HF repo
         lora_paths: List of LoRA paths to load
         lora_scale: LoRA strength (0.0 to 2.0)
     """
     global _PIPELINE_CACHE
 
+    base_model_path = base_model_path or None
+
+    total_start = time.perf_counter()
+    logger.info(
+        "Pipeline load request "
+        f"model_id={model_id} pipeline_ctor={_get_pipeline_id(pipeline_ctor)} "
+        f"offload_mode={offload_mode} lora_count={len(lora_paths or [])} "
+        f"hf_token_present={bool(hf_token)} base_model_path={base_model_path!r}"
+    )
+
+    resolve_start = time.perf_counter()
     resolved_loras = _maybe_download_lora_paths(lora_paths)
+    logger.info(
+        f"[TIMING] resolve_lora_paths: {time.perf_counter() - resolve_start:.3f}s "
+        f"resolved_loras={_safe_lora_summary(resolved_loras)}"
+    )
     scale_value = _normalize_lora_scale_value(lora_scale)
     pipeline_id = _get_pipeline_id(pipeline_ctor)
     key = PipelineCacheKey(
@@ -184,25 +245,39 @@ def get_or_load_pipeline(
         pipeline_id=pipeline_id,
         offload_mode=offload_mode,
         hf_token=hf_token or None,
+        base_model_path=base_model_path,
         lora_paths_key=_normalize_lora_paths_for_cache(resolved_loras),
         lora_scale_key=_normalize_lora_scale_for_cache(scale_value),
     )
 
     if _PIPELINE_CACHE["instance"] is not None and _PIPELINE_CACHE["key"] == key:
+        logger.info(f"Pipeline cache hit model_id={model_id} elapsed={time.perf_counter() - total_start:.3f}s")
         return _PIPELINE_CACHE["instance"]
 
     if _PIPELINE_CACHE["instance"] is not None:
+        unload_start = time.perf_counter()
+        logger.info(
+            "Pipeline cache miss; unloading previous pipeline "
+            f"key={_safe_cache_key_summary(_PIPELINE_CACHE['key'])}"
+        )
         try:
             _PIPELINE_CACHE["instance"].unload()
         except Exception:
-            pass
+            logger.exception("Failed while unloading previous pipeline instance")
+        logger.info(f"[TIMING] unload_previous_pipeline: {time.perf_counter() - unload_start:.3f}s")
         _PIPELINE_CACHE["instance"] = None
         _PIPELINE_CACHE["key"] = None
 
-    logger.info(f"Loading pipeline model_id={model_id} offload_mode={offload_mode} loras={resolved_loras} scale={scale_value}")
-    pipe = pipeline_ctor(device="cuda", offload_mode=offload_mode, hf_token=hf_token or None)
+    logger.info(f"Loading pipeline model_id={model_id} offload_mode={offload_mode} loras={_safe_lora_summary(resolved_loras)} scale={scale_value}")
+    ctor_start = time.perf_counter()
+    pipe = pipeline_ctor(device="cuda", offload_mode=offload_mode, hf_token=hf_token or None, base_model_path=base_model_path)
+    logger.info(f"[TIMING] pipeline_ctor: {time.perf_counter() - ctor_start:.3f}s")
+
+    load_start = time.perf_counter()
     pipe.load(lora_paths=resolved_loras, lora_scale=scale_value)
+    logger.info(f"[TIMING] pipeline_load_call: {time.perf_counter() - load_start:.3f}s")
 
     _PIPELINE_CACHE["instance"] = pipe
     _PIPELINE_CACHE["key"] = key
+    logger.info(f"Pipeline load request complete model_id={model_id} total_elapsed={time.perf_counter() - total_start:.3f}s")
     return pipe

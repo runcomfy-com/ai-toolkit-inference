@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
 
+# Pipelines that honor a local base_model_path override (see issue #23). Others ignore it.
+LOCAL_MODEL_PATH_PIPELINES = frozenset({
+    "flux2", "flux2_klein_4b", "flux2_klein_9b",
+    "flux", "flux_kontext", "flex1", "zimage", "zimage_turbo",
+})
+
 
 def _comfy_batch_to_pil_list(img: torch.Tensor) -> list[Image.Image]:
     """Convert a ComfyUI IMAGE tensor [B,H,W,C] in 0..1 to a list of PIL images."""
@@ -210,6 +216,22 @@ class RCAITKLoadPipeline:
             },
             "optional": {
                 "lora": ("AITK_LORA",),
+                "base_model_path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": (
+                            "Optional local directory for the BASE model weights, to avoid "
+                            "downloading them from Hugging Face. For FLUX.2/klein this overrides "
+                            "only the transformer (a folder with the .safetensors); the VAE, text "
+                            "encoder and tokenizer still come from their own HF repos. For "
+                            "from_pretrained models (FLUX.1/Flex.1/Z-Image) point it at a local "
+                            "diffusers snapshot. Honored by FLUX.2/klein, FLUX.1, Flex.1, Z-Image; "
+                            "ignored by other models. Leave empty to use the default HF repo."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -223,6 +245,7 @@ class RCAITKLoadPipeline:
         offload_mode: str,
         hf_token: str,
         lora=None,
+        base_model_path: str = "",
     ):
         # Import pipeline classes lazily
         ctor_map = {
@@ -287,6 +310,15 @@ class RCAITKLoadPipeline:
         # Empty token -> None
         token = hf_token.strip() or None
 
+        # Optional local model dir override (issue #23).
+        local_path = (base_model_path or "").strip() or None
+        if local_path and pipeline not in LOCAL_MODEL_PATH_PIPELINES:
+            logger.warning(
+                "base_model_path was set but pipeline '%s' does not honor it yet; "
+                "the local path will be ignored and the model downloaded from Hugging Face.",
+                pipeline,
+            )
+
         pipe = get_or_load_pipeline(
             model_id=pipeline,
             pipeline_ctor=pipeline_ctor,
@@ -294,6 +326,7 @@ class RCAITKLoadPipeline:
             lora_scale=lora_scale,
             offload_mode=offload_mode,
             hf_token=token,
+            base_model_path=local_path,
         )
 
         return (pipe,)

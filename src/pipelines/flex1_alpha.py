@@ -32,7 +32,7 @@ class Flex1AlphaPipeline(BasePipeline):
     def _load_pipeline(self):
         """Load Flex.1-alpha pipeline."""
         self.pipe = FluxPipeline.from_pretrained(
-            self.CONFIG.base_model,
+            self._resolve_base_model_source(),
             torch_dtype=self.dtype,
             token=self.hf_token,
         )
