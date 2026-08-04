@@ -338,6 +338,34 @@ class MinimaxH3Pipeline(BasePipeline):
             )
         self._load_pipeline()
 
+    def unload(self):
+        """Drop every H3 component, then defer to the base cleanup.
+
+        BasePipeline.unload() only deletes self.pipe. For H3 that frees almost
+        nothing: the ~42.5 GB of weights are held by self.transformer /
+        text_encoder / video_vae / audio_vae and by _model_shim, which keeps its
+        own references. Without this override, swapping models or reloading for
+        a different LoRA scale keeps the old weights resident while the
+        replacement loads — an OOM on any card that cannot hold two H3s.
+
+        The forward hooks are removed too: they own the LoRA tensors in their
+        closures, which .to()/del on the module tree would never reach.
+        """
+        for h in self._lora_handles:
+            h.remove()
+        self._lora_handles = []
+
+        self._model_shim = None
+        self.transformer = None
+        self.text_encoder = None
+        self.tokenizer = None
+        self.processor = None
+        self.video_vae = None
+        self.audio_vae = None
+
+        super().unload()
+        _flush()
+
     def _resolve_comfy_file(self, component: str) -> str:
         """Find a weight file locally, else pull it through the HF cache.
 
@@ -782,6 +810,17 @@ class MinimaxH3Pipeline(BasePipeline):
             raise ValueError(
                 "MiniMax-H3 single-frame (image) mode is not exposed; "
                 "use num_frames on the 17n+5 grid (5, 22, 39, ..., 107, 124)"
+            )
+
+        # H3's timeline is fixed at 24 fps (packing.FPS) and the audio is
+        # generated for that duration. executor._save_video_result muxes with
+        # the REQUESTED params.fps, not the fps we return, so honouring a
+        # different value here would speed the video up against a 24 fps
+        # waveform and desync the two. Reject rather than silently mismux.
+        if fps is not None and int(fps) != FPS:
+            raise ValueError(
+                f"MiniMax-H3 generates a fixed {FPS} fps timeline with audio to "
+                f"match; fps={fps} would desynchronise the muxed output"
             )
 
         requested_frames = num_frames

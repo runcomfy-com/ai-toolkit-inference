@@ -667,8 +667,11 @@ class RCAITKGenerate:
             base = [ctrl_img] if ctrl_img is not None else []
             ctrl_imgs = base + extras
 
-        # Check if this is a video model
-        is_video = getattr(getattr(pipe, "CONFIG", None), "is_video", False)
+        # Check if this is a video model. NOTE the field is is_video_model --
+        # PipelineConfig has never had an `is_video` attribute, so the old
+        # getattr(..., "is_video", False) silently evaluated False for every
+        # video model and dropped num_frames/fps from the generate() call.
+        is_video = getattr(getattr(pipe, "CONFIG", None), "is_video_model", False)
 
         # Model-specific options that must match how the LoRA was trained.
         # BasePipeline.apply_model_options() is a no-op for models that declare
@@ -705,6 +708,12 @@ class RCAITKGenerate:
         frames = result.get("frames")
         if frames:
             return (pil_frames_to_comfy_images(frames),)
+
+        # Video pipelines that decode straight to a tensor (minimax_h3) return
+        # [T,H,W,C] uint8; Comfy wants [T,H,W,C] float in 0..1.
+        video_tensor = result.get("video_tensor")
+        if video_tensor is not None:
+            return (video_tensor.float() / 255.0,)
 
         raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")
 
