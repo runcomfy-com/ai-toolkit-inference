@@ -194,6 +194,30 @@ def _load_aitk_h3_modules() -> Dict[str, Any]:
     return modules
 
 
+def _ensure_toolkit_importable() -> None:
+    """Put ai-toolkit's root on sys.path so `import toolkit.*` resolves.
+
+    The H3 leaf modules are loaded by absolute path (_load_aitk_h3_modules), so
+    they work without ai-toolkit being importable as a package. The quantized
+    weight loader does NOT: it is a normal `from toolkit.util...` import and
+    needs the repo root on sys.path.
+
+    The production image sets PYTHONPATH=/app/ai-toolkit so this is a no-op
+    there. A ComfyUI Manager install clones into vendor/ai-toolkit and only puts
+    the extension root on sys.path, so without this the pipeline dies with
+    ModuleNotFoundError: No module named 'toolkit' before any weight is read.
+
+    Derived from the H3 src dir rather than settings alone, so it stays correct
+    for whichever of the resolution paths actually found the checkout.
+    """
+    src_dir = _find_h3_src_dir()
+    # <root>/extensions_built_in/diffusion_models/minimax_h3/src -> <root>
+    root = os.path.abspath(os.path.join(src_dir, *[os.pardir] * 4))
+    if os.path.isdir(os.path.join(root, "toolkit")) and root not in sys.path:
+        sys.path.insert(0, root)
+        logger.info("MiniMax-H3: added %s to sys.path for `toolkit` imports", root)
+
+
 def _make_lora_hook(down: torch.Tensor, up: torch.Tensor, scale: float):
     """Build a forward hook applying a live additive LoRA to a linear's output.
 
@@ -424,6 +448,8 @@ class MinimaxH3Pipeline(BasePipeline):
         that turns a bad port into an exception instead of plausible garbage.
         """
         from safetensors.torch import load_file
+
+        _ensure_toolkit_importable()
         from toolkit.util.comfy_quant_import import (
             import_comfy_quantized_layers,
             OstrisLinear,
@@ -486,6 +512,7 @@ class MinimaxH3Pipeline(BasePipeline):
             AutoTokenizer,
             Qwen3VLForConditionalGeneration,
         )
+        _ensure_toolkit_importable()
         from toolkit.util.comfy_quant_import import (
             import_comfy_quantized_layers,
             OstrisLinear,
