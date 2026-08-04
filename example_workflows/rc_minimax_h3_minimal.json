@@ -1,0 +1,41 @@
+{
+  "1": {
+    "inputs": {
+      "pipeline": "minimax_h3",
+      "offload_mode": "none",
+      "hf_token": ""
+    },
+    "class_type": "RCAITKLoadPipeline",
+    "_meta": {
+      "title": "Load MiniMax-H3 Pipeline"
+    }
+  },
+  "2": {
+    "inputs": {
+      "pipe": ["1", 0],
+      "prompt": "a woman holding a coffee cup, in a beanie, sitting at a cafe",
+      "negative_prompt": "",
+      "width": 768,
+      "height": 768,
+      "steps": 28,
+      "cfg": 1.0,
+      "seed": 42,
+      "num_frames": 107,
+      "fps": 24
+    },
+    "class_type": "RCAITKGenerate",
+    "_meta": {
+      "title": "Generate (video + audio)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "filename_prefix": "rc_minimax_h3",
+      "images": ["2", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Frames"
+    }
+  }
+}

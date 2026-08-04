@@ -230,3 +230,65 @@ class TestFrameGrid:
         # 17n+5 closed form, mirroring packing.align_num_frames_down
         snapped = ((requested - 5) // 17) * 17 + 5
         assert snapped == expected
+
+class TestComfyUINode:
+    """The node class and PipelineConfig are two hand-maintained copies of the
+    same numbers. skill: "3 files, keep in sync" — this is what catches drift."""
+
+    @pytest.fixture
+    def node(self):
+        from comfyui_nodes.rc_models import RCMinimaxH3
+
+        return RCMinimaxH3
+
+    @pytest.fixture
+    def config(self):
+        from src.pipelines.minimax_h3 import MinimaxH3Pipeline
+
+        return MinimaxH3Pipeline.CONFIG
+
+    def test_registered_in_mappings(self, node):
+        from comfyui_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+        assert NODE_CLASS_MAPPINGS["RCMinimaxH3"] is node
+        assert NODE_DISPLAY_NAME_MAPPINGS["RCMinimaxH3"] == "RC MiniMax-H3"
+
+    def test_model_id_matches(self, node, config):
+        assert node.MODEL_ID == config.model_type.value
+
+    def test_resolution_step_matches_divisor(self, node, config):
+        """A mismatch means the UI snaps to a different grid than the pipeline,
+        so the user picks a size that is then silently floored."""
+        assert node.RESOLUTION_STEP == config.resolution_divisor
+
+    @pytest.mark.parametrize(
+        "node_attr,config_attr",
+        [
+            ("DEFAULT_WIDTH", "default_width"),
+            ("DEFAULT_HEIGHT", "default_height"),
+            ("DEFAULT_NUM_FRAMES", "default_num_frames"),
+            ("DEFAULT_FPS", "default_fps"),
+            ("DEFAULT_STEPS", "default_steps"),
+            ("DEFAULT_GUIDANCE", "default_guidance_scale"),
+            ("SUPPORTS_NEGATIVE", "supports_negative_prompt"),
+            ("IS_VIDEO", "is_video_model"),
+        ],
+    )
+    def test_defaults_match_config(self, node, config, node_attr, config_attr):
+        assert getattr(node, node_attr) == getattr(config, config_attr)
+
+    def test_fps_is_24(self, node):
+        """The sampler mixes audio for a 24 fps timeline and rejects anything
+        else; a different node default fails every stock workflow."""
+        assert node.DEFAULT_FPS == 24
+
+    def test_exposes_one_control_image_slot(self, node):
+        """Optional first-frame keyframe: absent -> t2v, present -> i2v."""
+        assert node.CONTROL_IMAGE_SLOTS == 1
+        assert node.REQUIRES_CONTROL_IMAGE is False
+
+    def test_input_types_constructs(self, node):
+        types = node.INPUT_TYPES()
+        assert "required" in types
+        w = types["required"]["width"][1]
+        assert w["step"] == 32 and w["default"] == 768

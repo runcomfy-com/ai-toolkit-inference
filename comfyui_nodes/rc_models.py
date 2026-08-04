@@ -802,3 +802,38 @@ class RCKrea2EditTurbo(_RCAitkBase):
     def _pipeline_ctor(self):
         from src.pipelines.krea2 import Krea2EditTurboPipeline
         return Krea2EditTurboPipeline
+
+# ===== MiniMax-H3 =====
+
+class RCMinimaxH3(_RCAitkBase):
+    MODEL_ID = "minimax_h3"
+    DISPLAY_NAME = "RC MiniMax-H3"
+    IS_VIDEO = True
+    # 16x VAE spatial compression * 2x2 transformer patch. Must match
+    # PipelineConfig.resolution_divisor -- non-multiples are floored with a
+    # warning, so a mismatched step silently changes the output size.
+    RESOLUTION_STEP = 32
+    DEFAULT_WIDTH = 768
+    DEFAULT_HEIGHT = 768
+    # 107 = 17*6+5, on the model's temporal grid. Off-grid values snap DOWN,
+    # so 120 would quietly become 107.
+    DEFAULT_NUM_FRAMES = 107
+    # Fixed: the sampler generates a 24 fps timeline and mixes audio to match.
+    # Any other value is rejected rather than silently desynced.
+    DEFAULT_FPS = 24
+    DEFAULT_STEPS = 28
+    # Guidance-distilled: the sampler has no unconditional branch at all, so
+    # guidance_scale is accepted and ignored, and a negative prompt has nowhere
+    # to go.
+    DEFAULT_GUIDANCE = 1.0
+    SUPPORTS_NEGATIVE = False
+    # Optional first-frame keyframe: absent -> t2v, present -> i2v.
+    REQUIRES_CONTROL_IMAGE = False
+    CONTROL_IMAGE_SLOTS = 1
+    # Components are placed manually in _load_pipeline, so the generic offload
+    # paths are no-ops for this model.
+    DEFAULT_OFFLOAD_MODE = "none"
+
+    def _pipeline_ctor(self):
+        from src.pipelines.minimax_h3 import MinimaxH3Pipeline
+        return MinimaxH3Pipeline

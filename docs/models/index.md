@@ -68,6 +68,7 @@ If you’re trying to reproduce AI Toolkit training **sample previews**, start f
 | [HiDream E1 (HiDream-E1-Full)](hidream-e1/) | `hidream_e1` | `HiDream-ai/HiDream-E1-Full` | Image editing. Requires `ctrl_img`. Uses fused LoRA (reload required for different scales). |
 | [Krea 2 Edit](krea2-o-edit/) | `krea2_o_edit` | `krea/Krea-2-Raw` | In-context edit, up to 3 reference images. `kv_cache` is on, matching the `krea2:o_edit` training preset — a LoRA trained with it must be inferenced with it. |
 | [Krea 2 Edit Turbo](krea2-o-edit-turbo/) | `krea2_o_edit_turbo` | `krea/Krea-2-Turbo` | Step-distilled in-context edit (8 steps / guidance 1.0). Same reference-image and `kv_cache` behavior as Krea 2 Edit. |
+| [MiniMax-H3](minimax-h3/) | `minimax_h3` | `Comfy-Org/MiniMax-H3` | Video **with joint stereo audio**. Requires AI Toolkit (sampler + quantized loader). Fixed 24 fps; frames snap down to the `17n+5` grid. Guidance-distilled, so no negative prompt. LoRA attached live, never merged. |
 
 ## Video generation
 

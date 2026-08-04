@@ -42,6 +42,7 @@ Popular model docs (each page includes defaults + what commonly causes preview m
 - [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
 - [Z-Image Turbo LoRA inference (few-step defaults)](https://ai-toolkit-docs.runcomfy.com/models/zimage-turbo/) (`model="zimage_turbo"`)
 - [Krea 2 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/krea2/) (`model="krea2"`, plus `krea2_turbo` / `krea2_o_edit` / `krea2_o_edit_turbo`)
+- [MiniMax-H3 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/minimax-h3/) (`model="minimax_h3"`) — video with joint stereo audio
 - [FLUX.2-dev LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2/) (`model="flux2"`)
 - [FLUX.2-klein 4B/9B LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2-klein-4b/) (`model="flux2_klein_4b"` / `flux2_klein_9b`)
 - [FLUX Kontext LoRA inference (control-image edit)](https://ai-toolkit-docs.runcomfy.com/models/flux-kontext/) (`model="flux_kontext"`)

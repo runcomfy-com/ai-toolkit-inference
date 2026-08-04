@@ -90,6 +90,8 @@ Some nodes require an `IMAGE` input as a control/reference image:
 - `RCWan22I2V14B`
 
 `RCOmniGen2` supports reference images optionally (up to 5 control image slots).
+`RCMinimaxH3` takes an optional `control_image` as a first frame: absent gives
+text-to-video, present gives image-to-video.
 
 ### Video models
 
@@ -101,6 +103,10 @@ Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
 - `RCWan22TI2V5B`
+- `RCMinimaxH3` — video **with joint stereo audio**. Fixed 24 fps; `num_frames`
+  snaps down to the `17n+5` grid (5, 22, 39, 56, 73, 90, 107, 124). Leave `fps`
+  at the node default and the model's own 24 is used. Guidance-distilled, so
+  `negative_prompt` is inert.
 
 They expose `num_frames` and `fps` as optional inputs.
 
