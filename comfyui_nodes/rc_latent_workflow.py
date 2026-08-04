@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
 
+# Generic fps default for the node input. A pipeline whose CONFIG declares a
+# default_fps overrides it unless the user changes this value.
+_NODE_DEFAULT_FPS = 16
+
 
 def _comfy_batch_to_pil_list(img: torch.Tensor) -> list[Image.Image]:
     """Convert a ComfyUI IMAGE tensor [B,H,W,C] in 0..1 to a list of PIL images."""
@@ -622,7 +626,7 @@ class RCAITKGenerate:
                 "control_image_2": ("IMAGE",),
                 "control_image_3": ("IMAGE",),
                 "num_frames": ("INT", {"default": 41, "min": 1, "max": 201, "tooltip": "For video models only"}),
-                "fps": ("INT", {"default": 16, "min": 1, "max": 120, "tooltip": "For video models only"}),
+                "fps": ("INT", {"default": _NODE_DEFAULT_FPS, "min": 1, "max": 120, "tooltip": "For video models only. Left at the default, the model's own fps is used (e.g. MiniMax-H3 is fixed at 24)."}),
                 "kv_cache": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.kv_cache -- it changes the reference attention mask, so a mismatch silently produces wrong output. Set false for adapters trained before 2026-07-16. Ignored by other models."}),
                 "match_target_res": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.match_target_res. Ignored by other models."}),
             },
@@ -673,6 +677,19 @@ class RCAITKGenerate:
         # video model and dropped num_frames/fps from the generate() call.
         is_video = getattr(getattr(pipe, "CONFIG", None), "is_video_model", False)
 
+        # The node's fps default (16) is generic; a model that generates on a
+        # fixed timeline knows better. H3 produces a 24 fps timeline with audio
+        # muxed to match and rejects anything else, so leaving the node default
+        # in place would fail every stock workflow. Only override when the user
+        # has not touched the input -- an explicit non-default value still
+        # reaches the pipeline, and a model that cannot honour it should say so.
+        model_fps = getattr(getattr(pipe, "CONFIG", None), "default_fps", None)
+        effective_fps = (
+            int(model_fps)
+            if (model_fps and int(fps) == _NODE_DEFAULT_FPS)
+            else int(fps)
+        )
+
         # Model-specific options that must match how the LoRA was trained.
         # BasePipeline.apply_model_options() is a no-op for models that declare
         # none, so this is safe to call unconditionally.
@@ -698,7 +715,7 @@ class RCAITKGenerate:
                 control_image=ctrl_img,
                 control_images=ctrl_imgs,
                 num_frames=int(num_frames) if is_video else None,
-                fps=int(fps) if is_video else None,
+                fps=effective_fps if is_video else None,
             )
 
         # Handle result

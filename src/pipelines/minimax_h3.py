@@ -49,7 +49,12 @@ from typing import Any, Dict, List, Optional
 import torch
 from PIL import Image
 
-from .base import BasePipeline, LoraMergeMethod, PipelineConfig
+from .base import (
+    _PIPELINE_STEP_OBSERVER,
+    BasePipeline,
+    LoraMergeMethod,
+    PipelineConfig,
+)
 from ..config import settings
 from ..schemas.models import ModelType
 
@@ -247,6 +252,70 @@ def _make_lora_hook(down: torch.Tensor, up: torch.Tensor, scale: float):
         return output + delta.to(output.dtype) * scale
 
     return hook
+
+
+class _StepObserverHook:
+    """Drive the installed pipeline step observer from transformer forwards.
+
+    The other pipelines get progress and cancellation for free through
+    diffusers' callback_on_step_end (base.py:311). ai-toolkit's H3 sampler has
+    no callback parameter, so without this ComfyUI shows a frozen UI for ~95 s
+    and its cancel button does nothing.
+
+    One transformer forward == one sampling step here: H3 is guidance-distilled
+    and runs a single pass per step, with no CFG batch to double-count.
+
+    Measured: the sampler runs num_inference_steps - 1 forwards, because
+    pipeline.py:158 derives its loop from `sigmas_v.shape[0] - 1` and the
+    schedule holds exactly num_inference_steps sigmas. Rather than hardcode that
+    off-by-one — an upstream detail that could change — the bar is reported
+    against the requested step count and topped up on close, so the user sees
+    the number they asked for and it always finishes at 100%.
+
+    The observer raises to interrupt (comfy_callbacks calls
+    throw_exception_if_processing_interrupted), which propagates out of the
+    forward and aborts the run — the intended behaviour.
+    """
+
+    def __init__(self, transformer, total_steps: int):
+        self._handle = None
+        self._observer = _PIPELINE_STEP_OBSERVER.get()
+        if self._observer is None:
+            return
+        self._total = int(total_steps)
+        self._i = 0
+        self._handle = transformer.register_forward_hook(self._on_forward)
+
+    def _on_forward(self, module, args, output):
+        obs = self._observer
+        if obs is None:
+            return output
+        i = min(self._i, self._total - 1)
+        self._i += 1
+        obs(i, self._total, None)
+        return output
+
+    def close(self):
+        if self._handle is not None:
+            self._handle.remove()
+            self._handle = None
+        # Top the bar up: the loop runs one fewer forward than the requested
+        # step count, so without this it would stop one notch short.
+        obs = self._observer
+        if obs is not None and self._i < self._total:
+            try:
+                obs(self._total - 1, self._total, None)
+            except Exception:
+                # A cancel raised here would mask the real result; the run is
+                # already finished by the time close() is reached.
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 class _ModelShim:
@@ -867,17 +936,18 @@ class MinimaxH3Pipeline(BasePipeline):
 
         conditional_embeds = self._encode_prompt(prompt, ctrl)
 
-        out = self.pipe(
-            conditional_embeds=conditional_embeds,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            generator=generator,
-            ctrl_img=ctrl,
-            with_audio=True,
-        )
+        with _StepObserverHook(self.transformer, num_inference_steps):
+            out = self.pipe(
+                conditional_embeds=conditional_embeds,
+                height=height,
+                width=width,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+                ctrl_img=ctrl,
+                with_audio=True,
+            )
 
         # key rename: the sampler returns "video", executor._save_video_result
         # (executor.py:379-382) reads "video_tensor". out["video"] is already
