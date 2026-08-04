@@ -33,6 +33,25 @@ Unlike most entries here, this pipeline does **not** wrap a Diffusers pipeline. 
 | LoRA scale behavior | Attached as a **live adapter**, never merged (see below) |
 | Needs AI Toolkit | **Required** — the sampler and the quantized-weight loader both come from it |
 
+## Local and ComfyUI installs need a newer Transformers
+
+The H3 text encoder uses `Qwen3VLProcessor.create_mm_token_type_ids`, which
+landed in **transformers 5.5.3**. `requirements-inference.txt` pins **4.57.3**
+because 11 of the 28 pipelines import transformers and 4.57 → 5.5 is a major
+jump that needs its own regression pass across all of them.
+
+The **production image is unaffected** — it installs ai-toolkit's requirements
+(transformers 5.5.3) and then this repo's `requirements.txt`, never
+`requirements-inference.txt`. For a local or ComfyUI Manager install that wants
+H3, upgrade the one package yourself:
+
+```bash
+pip install "transformers==5.5.3"
+```
+
+Without it the pipeline raises a message naming this constraint before any
+weights load, rather than failing deep inside the model.
+
 ## Reference implementation (source of truth)
 
 - **Pipeline implementation:** [`src/pipelines/minimax_h3.py`](https://github.com/runcomfy-com/ai-toolkit-inference/blob/main/src/pipelines/minimax_h3.py)

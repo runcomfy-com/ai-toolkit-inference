@@ -25,9 +25,25 @@ logger = logging.getLogger(__name__)
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
 
-# Generic fps default for the node input. A pipeline whose CONFIG declares a
-# default_fps overrides it unless the user changes this value.
-_NODE_DEFAULT_FPS = 16
+# Sentinel for the node's fps input: 0 means "whatever this pipeline generates
+# at". It has to be a value no user would ever type, because the alternative --
+# treating some real fps as "untouched" -- makes that fps unselectable. Picking
+# 16 for that role meant an explicit 16 on LTX-2 (default_fps=24) came out as 24.
+_FPS_USE_MODEL_DEFAULT = 0
+
+
+def _resolve_fps(requested: int, model_fps: int | None) -> int:
+    """Resolve the node's fps input against the pipeline's own timeline.
+
+    A model that generates on a fixed timeline knows its own fps: H3 produces
+    24 fps with audio muxed to match and rejects anything else, so a generic
+    node-wide default would fail every stock workflow. The sentinel asks for
+    that model default; anything else is the user's explicit choice and is
+    passed through untouched, including values the model will refuse.
+    """
+    if int(requested) == _FPS_USE_MODEL_DEFAULT and model_fps:
+        return int(model_fps)
+    return int(requested)
 
 
 def _comfy_batch_to_pil_list(img: torch.Tensor) -> list[Image.Image]:
@@ -626,7 +642,7 @@ class RCAITKGenerate:
                 "control_image_2": ("IMAGE",),
                 "control_image_3": ("IMAGE",),
                 "num_frames": ("INT", {"default": 41, "min": 1, "max": 201, "tooltip": "For video models only"}),
-                "fps": ("INT", {"default": _NODE_DEFAULT_FPS, "min": 1, "max": 120, "tooltip": "For video models only. Left at the default, the model's own fps is used (e.g. MiniMax-H3 is fixed at 24)."}),
+                "fps": ("INT", {"default": _FPS_USE_MODEL_DEFAULT, "min": 0, "max": 120, "tooltip": "For video models only. 0 uses the model's own fps (e.g. MiniMax-H3 is fixed at 24); any other value is passed through, and a model that cannot honour it will say so."}),
                 "kv_cache": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.kv_cache -- it changes the reference attention mask, so a mismatch silently produces wrong output. Set false for adapters trained before 2026-07-16. Ignored by other models."}),
                 "match_target_res": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.match_target_res. Ignored by other models."}),
             },
@@ -677,17 +693,8 @@ class RCAITKGenerate:
         # video model and dropped num_frames/fps from the generate() call.
         is_video = getattr(getattr(pipe, "CONFIG", None), "is_video_model", False)
 
-        # The node's fps default (16) is generic; a model that generates on a
-        # fixed timeline knows better. H3 produces a 24 fps timeline with audio
-        # muxed to match and rejects anything else, so leaving the node default
-        # in place would fail every stock workflow. Only override when the user
-        # has not touched the input -- an explicit non-default value still
-        # reaches the pipeline, and a model that cannot honour it should say so.
-        model_fps = getattr(getattr(pipe, "CONFIG", None), "default_fps", None)
-        effective_fps = (
-            int(model_fps)
-            if (model_fps and int(fps) == _NODE_DEFAULT_FPS)
-            else int(fps)
+        effective_fps = _resolve_fps(
+            fps, getattr(getattr(pipe, "CONFIG", None), "default_fps", None)
         )
 
         # Model-specific options that must match how the LoRA was trained.

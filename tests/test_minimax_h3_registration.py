@@ -292,3 +292,45 @@ class TestComfyUINode:
         assert "required" in types
         w = types["required"]["width"][1]
         assert w["step"] == 32 and w["default"] == 768
+
+
+class TestGenericGenerateNodeFps:
+    """RCAITKGenerate is one node in front of every pipeline, so its fps input
+    has to serve both H3 (fixed 24, rejects everything else) and models that
+    honour whatever they are given. The bug this guards against: using a real
+    fps value as the "untouched" marker makes that fps unselectable."""
+
+    @pytest.fixture
+    def widget(self):
+        from comfyui_nodes.rc_latent_workflow import RCAITKGenerate
+
+        return RCAITKGenerate.INPUT_TYPES()["optional"]["fps"][1]
+
+    def test_default_is_the_sentinel(self, widget):
+        from comfyui_nodes.rc_latent_workflow import _FPS_USE_MODEL_DEFAULT
+
+        assert widget["default"] == _FPS_USE_MODEL_DEFAULT
+        assert widget["min"] <= _FPS_USE_MODEL_DEFAULT
+
+    def test_sentinel_is_not_a_usable_fps(self):
+        """0 is safe as a marker precisely because no one generates at 0 fps."""
+        from comfyui_nodes.rc_latent_workflow import _FPS_USE_MODEL_DEFAULT
+
+        assert _FPS_USE_MODEL_DEFAULT == 0
+
+    @pytest.mark.parametrize(
+        "requested,model_default,expected",
+        [
+            (0, 24, 24),    # H3 stock workflow: sentinel -> the model's 24
+            (0, 16, 16),    # same for a 16 fps model
+            (24, 24, 24),   # explicit, agrees
+            (16, 24, 16),   # explicit 16 on LTX-2 must survive, not become 24
+            (30, 24, 30),   # a value the model may refuse -- it should refuse,
+                            # rather than have the node quietly rewrite it
+            (0, None, 0),   # no CONFIG.default_fps: nothing to substitute
+        ],
+    )
+    def test_resolution(self, requested, model_default, expected):
+        from comfyui_nodes.rc_latent_workflow import _resolve_fps
+
+        assert _resolve_fps(requested, model_default) == expected
