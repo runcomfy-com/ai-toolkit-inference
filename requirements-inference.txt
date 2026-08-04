@@ -12,6 +12,14 @@ torchaudio
 torchao==0.10.0
 safetensors
 git+https://github.com/huggingface/diffusers@072d15ee4289ffdc3aa9d65f8b94bc9271319d21
+# NOTE: minimax_h3 needs >=5.5.3 for Qwen3VLProcessor.create_mm_token_type_ids.
+# Deliberately NOT bumped here: 11 of the 28 pipelines import transformers, and
+# 4.57 -> 5.5 is a major jump that needs its own regression pass across all of
+# them. The production image is unaffected -- Images/ai-toolkit-inference/
+# Dockerfile installs ai-toolkit's requirements (transformers==5.5.3) and then
+# this repo's requirements.txt, never this file. For a local or ComfyUI install
+# that wants H3, upgrade transformers manually; the pipeline raises a clear
+# error naming this constraint rather than failing deep in the model.
 transformers==4.57.3
 lycoris-lora==1.8.3
 flatten_json

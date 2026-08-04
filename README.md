@@ -42,6 +42,7 @@ Popular model docs (each page includes defaults + what commonly causes preview m
 - [Wan 2.2 14B I2V MoE LoRA inference (requires ctrl_img)](https://ai-toolkit-docs.runcomfy.com/models/wan22-14b-i2v/) (`model="wan22_14b_i2v"`)
 - [Z-Image Turbo LoRA inference (few-step defaults)](https://ai-toolkit-docs.runcomfy.com/models/zimage-turbo/) (`model="zimage_turbo"`)
 - [Krea 2 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/krea2/) (`model="krea2"`, plus `krea2_turbo` / `krea2_o_edit` / `krea2_o_edit_turbo`)
+- [MiniMax-H3 LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/minimax-h3/) (`model="minimax_h3"`) — video with joint stereo audio
 - [FLUX.2-dev LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2/) (`model="flux2"`)
 - [FLUX.2-klein 4B/9B LoRA inference](https://ai-toolkit-docs.runcomfy.com/models/flux2-klein-4b/) (`model="flux2_klein_4b"` / `flux2_klein_9b`)
 - [FLUX Kontext LoRA inference (control-image edit)](https://ai-toolkit-docs.runcomfy.com/models/flux-kontext/) (`model="flux_kontext"`)
@@ -66,6 +67,14 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 | `v0.7.29.202603241` | `0.7.29`                        | [`4ad14d211a969c217bf5470213c04c6052d17592`](https://github.com/ostris/ai-toolkit/commit/4ad14d211a969c217bf5470213c04c6052d17592) |
 | `v0.7.29.202604051` | `0.7.29`                        | [`4ad14d211a969c217bf5470213c04c6052d17592`](https://github.com/ostris/ai-toolkit/commit/4ad14d211a969c217bf5470213c04c6052d17592) |
 | `v0.11.0.202607241` | `0.11.0`                        | [`c4db100e172064117ad18b46898226a036c1b197`](https://github.com/ostris/ai-toolkit/commit/c4db100e172064117ad18b46898226a036c1b197) |
+| `v0.12.2.<pending>` | `0.12.2`                        | [`a9a04547e92a51583999ea2e7da8792da80e0d7a`](https://github.com/ostris/ai-toolkit/commit/a9a04547e92a51583999ea2e7da8792da80e0d7a) |
+
+
+The `0.12.2` row is the MiniMax-H3 release; its tag is assigned when the image
+is built. Note that `a9a04547` predates upstream's `18f5810d` ("Adjust default
+alpha for h3"), which pairs `network.linear_alpha` with the rank in the H3 arch
+entry. Our build carries an equivalent change, so H3 LoRAs train at the intended
+1.0x strength rather than 2.0x — the pinned commit alone would not tell you that.
 
 ---
 

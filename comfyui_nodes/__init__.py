@@ -35,6 +35,7 @@ from .rc_models import (
     RCKrea2Turbo,
     RCKrea2Edit,
     RCKrea2EditTurbo,
+    RCMinimaxH3,
 )
 
 # Latent workflow nodes
@@ -102,6 +103,7 @@ NODE_CLASS_MAPPINGS = {
     "RCKrea2Turbo": RCKrea2Turbo,
     "RCKrea2Edit": RCKrea2Edit,
     "RCKrea2EditTurbo": RCKrea2EditTurbo,
+    "RCMinimaxH3": RCMinimaxH3,
 
     # Latent workflow nodes
     "RCAITKLoRA": RCAITKLoRA,
@@ -162,6 +164,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "RCKrea2Turbo": "RC Krea 2 Turbo",
     "RCKrea2Edit": "RC Krea 2 Edit",
     "RCKrea2EditTurbo": "RC Krea 2 Edit Turbo",
+    "RCMinimaxH3": "RC MiniMax-H3",
 
     # Latent workflow nodes
     "RCAITKLoRA": "RC AITK LoRA",

@@ -161,6 +161,33 @@ MODEL_DOWNLOAD_CONFIGS: Dict[ModelType, DownloadConfig] = {
             ExtraDownload(repo_id="Qwen/Qwen-Image", allow_patterns=["vae/*"]),
         ],
     ),
+
+    # MiniMax-H3 (fl2va). allow_patterns is NOT optional here: unfiltered,
+    # Comfy-Org/MiniMax-H3 is ~365 GB (bf16 + int8 + fp8 + int8-pruned, two
+    # partitions, three text encoders). These four files are 42.5 GB.
+    # Likewise MiniMaxAI/MiniMax-H3 is 297 files including the full bf16
+    # original -- we want three tiny config/tokenizer subfolders.
+    # Watch the _merge_download_tasks dedupe invariant
+    # (src/cli/download_models.py:51-69): if either side's patterns are None
+    # the merge collapses to a full pull. No other entry shares these repos.
+    ModelType.MINIMAX_H3: DownloadConfig(
+        allow_patterns=[
+            "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "vae/minimax_h3_video_vae_fp16.safetensors",
+            "vae/minimax_h3_audio_vae_fp32.safetensors",
+        ],
+        extras=[
+            ExtraDownload(
+                repo_id="MiniMaxAI/MiniMax-H3",
+                allow_patterns=[
+                    "FL2VA/tokenizer/*",
+                    "FL2VA/processor/*",
+                    "FL2VA/text_encoder/config.json",
+                ],
+            ),
+        ],
+    ),
 }
 
 

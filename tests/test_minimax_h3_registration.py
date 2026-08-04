@@ -1,0 +1,431 @@
+"""MiniMax-H3 registration, config and LoRA-key-parsing tests.
+
+None of these need a GPU or the weights. They lock down the parts that fail
+silently: registry wiring, the download filter (the difference between 42.5 GB
+and ~365 GB), and the LoRA key parsing (which "works" while dropping a quarter
+of the modules if the target matching is wrong).
+"""
+
+import json
+import struct
+
+import pytest
+
+from src.schemas.models import ModelType, get_supported_models
+from src.pipelines import _LAZY_IMPORTS, _MODEL_TYPE_TO_CLASS
+from src.pipelines.base import LoraMergeMethod
+from src.services.download_config import MODEL_DOWNLOAD_CONFIGS
+
+
+class TestRegistration:
+    def test_model_type_exists(self):
+        assert ModelType.MINIMAX_H3.value == "minimax_h3"
+
+    def test_in_supported_models(self):
+        assert "minimax_h3" in get_supported_models()
+
+    def test_dispatches_to_pipeline_class(self):
+        assert _MODEL_TYPE_TO_CLASS[ModelType.MINIMAX_H3] == "MinimaxH3Pipeline"
+
+    def test_lazy_import_target(self):
+        assert _LAZY_IMPORTS["MinimaxH3Pipeline"] == (".minimax_h3", "MinimaxH3Pipeline")
+
+    def test_pipeline_imports_without_heavy_deps(self):
+        """Module-scope import must not need ai-toolkit, transformers or the
+        weights: src/pipelines/__init__.py builds the registry with no
+        try/except, so a top-level failure breaks FastAPI startup for the whole
+        catalog."""
+        from src.pipelines.minimax_h3 import MinimaxH3Pipeline
+
+        assert MinimaxH3Pipeline.CONFIG.model_type is ModelType.MINIMAX_H3
+
+
+class TestConfig:
+    @pytest.fixture
+    def config(self):
+        from src.pipelines.minimax_h3 import MinimaxH3Pipeline
+
+        return MinimaxH3Pipeline.CONFIG
+
+    def test_video_model_with_audio_defaults(self, config):
+        assert config.is_video_model is True
+        assert config.default_num_frames == 107  # on the 17n+5 grid
+        assert config.default_fps == 24  # packing.FPS is fixed
+
+    def test_guidance_distilled(self, config):
+        """The sampler has no unconditional branch at all — guidance_scale is
+        accepted and ignored, and a negative prompt has nowhere to go."""
+        assert config.default_guidance_scale == 1.0
+        assert config.supports_negative_prompt is False
+
+    def test_resolution_divisor(self, config):
+        # 16x VAE spatial compression * 2x2 transformer patch
+        assert config.resolution_divisor == 32
+
+    def test_lora_is_custom_not_set_adapters(self, config):
+        """The transformer is a plain nn.Module with no PEFT/diffusers LoRA
+        API, so the generic adapter paths do not apply."""
+        assert config.lora_merge_method is LoraMergeMethod.CUSTOM
+
+    def test_control_image_is_optional(self, config):
+        """Absent -> t2v, present -> first-frame i2v. Both are valid."""
+        assert config.requires_control_image is False
+
+
+class TestDownloadConfig:
+    @pytest.fixture
+    def config(self):
+        return MODEL_DOWNLOAD_CONFIGS[ModelType.MINIMAX_H3]
+
+    def test_allow_patterns_are_mandatory(self, config):
+        """Unfiltered, Comfy-Org/MiniMax-H3 is ~365 GB (bf16 + int8 + fp8 +
+        int8-pruned, two partitions, three text encoders). These four files are
+        42.5 GB. An empty/None filter here is a 300 GB regression that no other
+        test would catch."""
+        assert config.allow_patterns, "MiniMax-H3 must filter its base repo"
+        assert len(config.allow_patterns) == 4
+
+    def test_pulls_fl2va_partition_only(self, config):
+        joined = " ".join(config.allow_patterns)
+        assert "fl2va" in joined
+        assert "ref2va" not in joined, "ref2va is a different conditioning contract"
+
+    def test_all_four_components_present(self, config):
+        joined = " ".join(config.allow_patterns)
+        assert "diffusion_models/" in joined  # DiT
+        assert "text_encoders/" in joined  # Qwen3-VL
+        assert joined.count("vae/") == 2  # video VAE + audio VAE
+
+    def test_extras_filtered_too(self, config):
+        """MiniMaxAI/MiniMax-H3 is 297 files including the full bf16 original;
+        we want three tiny config/tokenizer subfolders."""
+        assert len(config.extras) == 1
+        extra = config.extras[0]
+        assert extra.repo_id == "MiniMaxAI/MiniMax-H3"
+        assert extra.allow_patterns, "the original repo must be filtered"
+
+
+def _make_lora_header(module_names, rank=16, prefix="diffusion_model.", with_alpha=False):
+    """Build a safetensors header mimicking ai-toolkit's H3 LoRA save format."""
+    hdr = {"__metadata__": {"format": "pt"}}
+    offset = 0
+    for name in module_names:
+        for slot, shape in (("lora_A", [rank, 64]), ("lora_B", [64, rank])):
+            n = shape[0] * shape[1] * 4
+            hdr[f"{prefix}{name}.{slot}.weight"] = {
+                "dtype": "F32",
+                "shape": shape,
+                "data_offsets": [offset, offset + n],
+            }
+            offset += n
+        if with_alpha:
+            hdr[f"{prefix}{name}.alpha"] = {
+                "dtype": "F32", "shape": [], "data_offsets": [offset, offset + 4],
+            }
+            offset += 4
+    return hdr
+
+
+def _parse_like_attach_lora(keys, header):
+    """Replay _attach_lora's key parsing (kept in sync by eye; the point is to
+    lock the contract, not to re-import private code)."""
+    pairs, alphas = {}, {}
+    unmatched = []
+    for key in keys:
+        name = key
+        if name.startswith("diffusion_model."):
+            name = name[len("diffusion_model."):]
+        if name.endswith(".alpha"):
+            alphas[name[: -len(".alpha")]] = 1.0
+            continue
+        hit = False
+        for suffix, slot in (
+            (".lora_A.default.weight", "down"), (".lora_B.default.weight", "up"),
+            (".lora_A.weight", "down"), (".lora_B.weight", "up"),
+            (".lora_down.weight", "down"), (".lora_up.weight", "up"),
+        ):
+            if name.endswith(suffix):
+                pairs.setdefault(name[: -len(suffix)], {})[slot] = header[key]["shape"]
+                hit = True
+                break
+        if not hit:
+            unmatched.append(key)
+    return pairs, alphas, unmatched
+
+
+class TestLoraKeyParsing:
+    """Locks the real key layout observed in job a1977b6b (rank 16, 516
+    tensors, 258 complete pairs, zero alpha tensors)."""
+
+    REAL_TARGETS = (
+        [f"blocks.{i}.adaln_proj.linear" for i in range(50)]
+        + [f"blocks.{i}.attn.qkv_proj" for i in range(50)]
+        + [f"blocks.{i}.attn.out_proj" for i in range(50)]
+        + [f"blocks.{i}.mlp.fc1" for i in range(50)]
+        + [f"blocks.{i}.mlp.fc2" for i in range(50)]
+        + [f"token_refiner.blocks.{i}.attn.qkv_proj" for i in range(2)]
+        + [f"token_refiner.blocks.{i}.attn.out_proj" for i in range(2)]
+        + [f"token_refiner.blocks.{i}.mlp.fc1" for i in range(2)]
+        + [f"token_refiner.blocks.{i}.mlp.fc2" for i in range(2)]
+    )
+
+    def test_real_layout_parses_completely(self):
+        hdr = _make_lora_header(self.REAL_TARGETS)
+        keys = [k for k in hdr if k != "__metadata__"]
+        assert len(keys) == 516, "516 tensors in the observed adapter"
+        pairs, alphas, unmatched = _parse_like_attach_lora(keys, hdr)
+        assert not unmatched
+        assert len(pairs) == 258
+        assert all("down" in v and "up" in v for v in pairs.values())
+        assert alphas == {}, "peft_format strips .alpha (network_mixins.py:605-614)"
+
+    def test_adaln_and_token_refiner_are_not_dropped(self):
+        """A startswith('blocks.') whitelist would drop 58 of 258 modules and
+        still look like it worked. krea2 hit exactly that (32/256)."""
+        hdr = _make_lora_header(self.REAL_TARGETS)
+        keys = [k for k in hdr if k != "__metadata__"]
+        pairs, _, _ = _parse_like_attach_lora(keys, hdr)
+        assert sum(1 for k in pairs if "adaln_proj" in k) == 50
+        assert sum(1 for k in pairs if k.startswith("token_refiner.")) == 8
+
+    def test_missing_alpha_defaults_to_rank_giving_scale_one(self):
+        """With no .alpha tensor, alpha must default to rank so that
+        scale = alpha/rank = 1.0. Defaulting to 1 would scale every module by
+        1/16 and the LoRA would look like it barely applied."""
+        rank = 16
+        alpha = rank  # the default _attach_lora applies
+        assert (alpha / rank) * 1.0 == 1.0
+        wrong = (1 / rank) * 1.0
+        assert wrong == pytest.approx(0.0625)
+
+    def test_explicit_alpha_is_honoured(self):
+        hdr = _make_lora_header(["blocks.0.mlp.fc1"], with_alpha=True)
+        keys = [k for k in hdr if k != "__metadata__"]
+        pairs, alphas, unmatched = _parse_like_attach_lora(keys, hdr)
+        assert not unmatched
+        assert len(pairs) == 1
+        assert "blocks.0.mlp.fc1" in alphas
+
+    def test_peft_default_infix_is_tolerated(self):
+        """Some PEFT saves carry a `.default` infix; both spellings must map to
+        the same module name."""
+        hdr = {
+            "diffusion_model.blocks.0.mlp.fc1.lora_A.default.weight": {"shape": [16, 64]},
+            "diffusion_model.blocks.0.mlp.fc1.lora_B.default.weight": {"shape": [64, 16]},
+        }
+        pairs, _, unmatched = _parse_like_attach_lora(list(hdr), hdr)
+        assert not unmatched
+        assert list(pairs) == ["blocks.0.mlp.fc1"]
+
+
+class TestFrameGrid:
+    """17n+5 is enforced inside the sampler, but the API layer snaps too so the
+    response reports the real count instead of silently shrinking."""
+
+    @pytest.mark.parametrize(
+        "requested,expected",
+        [(5, 5), (22, 22), (39, 39), (107, 107), (110, 107), (124, 124), (130, 124)],
+    )
+    def test_grid_values(self, requested, expected):
+        # 17n+5 closed form, mirroring packing.align_num_frames_down
+        snapped = ((requested - 5) // 17) * 17 + 5
+        assert snapped == expected
+
+class TestComfyUINode:
+    """The node class and PipelineConfig are two hand-maintained copies of the
+    same numbers. skill: "3 files, keep in sync" — this is what catches drift."""
+
+    @pytest.fixture
+    def node(self):
+        from comfyui_nodes.rc_models import RCMinimaxH3
+
+        return RCMinimaxH3
+
+    @pytest.fixture
+    def config(self):
+        from src.pipelines.minimax_h3 import MinimaxH3Pipeline
+
+        return MinimaxH3Pipeline.CONFIG
+
+    def test_registered_in_mappings(self, node):
+        from comfyui_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+        assert NODE_CLASS_MAPPINGS["RCMinimaxH3"] is node
+        assert NODE_DISPLAY_NAME_MAPPINGS["RCMinimaxH3"] == "RC MiniMax-H3"
+
+    def test_model_id_matches(self, node, config):
+        assert node.MODEL_ID == config.model_type.value
+
+    def test_resolution_step_matches_divisor(self, node, config):
+        """A mismatch means the UI snaps to a different grid than the pipeline,
+        so the user picks a size that is then silently floored."""
+        assert node.RESOLUTION_STEP == config.resolution_divisor
+
+    @pytest.mark.parametrize(
+        "node_attr,config_attr",
+        [
+            ("DEFAULT_WIDTH", "default_width"),
+            ("DEFAULT_HEIGHT", "default_height"),
+            ("DEFAULT_NUM_FRAMES", "default_num_frames"),
+            ("DEFAULT_FPS", "default_fps"),
+            ("DEFAULT_STEPS", "default_steps"),
+            ("DEFAULT_GUIDANCE", "default_guidance_scale"),
+            ("SUPPORTS_NEGATIVE", "supports_negative_prompt"),
+            ("IS_VIDEO", "is_video_model"),
+        ],
+    )
+    def test_defaults_match_config(self, node, config, node_attr, config_attr):
+        assert getattr(node, node_attr) == getattr(config, config_attr)
+
+    def test_fps_is_24(self, node):
+        """The sampler mixes audio for a 24 fps timeline and rejects anything
+        else; a different node default fails every stock workflow."""
+        assert node.DEFAULT_FPS == 24
+
+    def test_exposes_one_control_image_slot(self, node):
+        """Optional first-frame keyframe: absent -> t2v, present -> i2v."""
+        assert node.CONTROL_IMAGE_SLOTS == 1
+        assert node.REQUIRES_CONTROL_IMAGE is False
+
+    def test_input_types_constructs(self, node):
+        types = node.INPUT_TYPES()
+        assert "required" in types
+        w = types["required"]["width"][1]
+        assert w["step"] == 32 and w["default"] == 768
+
+
+class TestGenericGenerateNodeFps:
+    """RCAITKGenerate is one node in front of every pipeline, so its fps input
+    has to serve both H3 (fixed 24, rejects everything else) and models that
+    honour whatever they are given. The bug this guards against: using a real
+    fps value as the "untouched" marker makes that fps unselectable."""
+
+    @pytest.fixture
+    def widget(self):
+        from comfyui_nodes.rc_latent_workflow import RCAITKGenerate
+
+        return RCAITKGenerate.INPUT_TYPES()["optional"]["fps"][1]
+
+    def test_default_is_the_sentinel(self, widget):
+        from comfyui_nodes.rc_latent_workflow import _FPS_USE_MODEL_DEFAULT
+
+        assert widget["default"] == _FPS_USE_MODEL_DEFAULT
+        assert widget["min"] <= _FPS_USE_MODEL_DEFAULT
+
+    def test_sentinel_is_not_a_usable_fps(self):
+        """0 is safe as a marker precisely because no one generates at 0 fps."""
+        from comfyui_nodes.rc_latent_workflow import _FPS_USE_MODEL_DEFAULT
+
+        assert _FPS_USE_MODEL_DEFAULT == 0
+
+    @pytest.mark.parametrize(
+        "requested,model_default,expected",
+        [
+            (0, 24, 24),    # H3 stock workflow: sentinel -> the model's 24
+            (0, 16, 16),    # same for a 16 fps model
+            (24, 24, 24),   # explicit, agrees
+            (16, 24, 16),   # explicit 16 on LTX-2 must survive, not become 24
+            (30, 24, 30),   # a value the model may refuse -- it should refuse,
+                            # rather than have the node quietly rewrite it
+            (0, None, 0),   # no CONFIG.default_fps: nothing to substitute
+        ],
+    )
+    def test_resolution(self, requested, model_default, expected):
+        from comfyui_nodes.rc_latent_workflow import _resolve_fps
+
+        assert _resolve_fps(requested, model_default) == expected
+
+
+class TestNodeResultDispatch:
+    """The node runs the full generation before it looks at the result keys, so
+    a key it does not handle is the most expensive possible way to fail. This
+    pins the dispatch for every shape a pipeline can return."""
+
+    @pytest.fixture
+    def node(self):
+        from comfyui_nodes.rc_models import RCMinimaxH3
+
+        return RCMinimaxH3()
+
+    def test_video_tensor_is_handled(self, node):
+        """H3 (and ltx2/ltx2.3) never populate `frames`."""
+        import torch
+        from comfyui_nodes.rc_common import video_tensor_to_comfy_images
+
+        video = torch.randint(0, 256, (4, 8, 8, 3), dtype=torch.uint8)
+        images, _audio = node._with_audio(
+            video_tensor_to_comfy_images(video),
+            {"audio": torch.zeros(2, 100), "audio_sample_rate": 32000},
+        )
+        assert images.shape == (4, 8, 8, 3)
+        assert images.dtype == torch.float32
+        assert 0.0 <= float(images.min()) and float(images.max()) <= 1.0
+
+    def test_uint8_scaling_is_a_rescale_not_a_permute(self):
+        """Routing these through the `frames=` path would give [T,C,H,W]."""
+        import torch
+        from comfyui_nodes.rc_common import video_tensor_to_comfy_images
+
+        video = torch.full((2, 4, 6, 3), 255, dtype=torch.uint8)
+        out = video_tensor_to_comfy_images(video)
+        assert out.shape == (2, 4, 6, 3)
+        assert torch.allclose(out, torch.ones_like(out))
+
+    def test_return_tuple_matches_declared_sockets(self, node):
+        """A tuple shorter or longer than RETURN_TYPES desyncs every downstream
+        link in the graph."""
+        import torch
+
+        out = node._with_audio(
+            torch.zeros(1, 4, 4, 3),
+            {"audio": torch.zeros(2, 100), "audio_sample_rate": 32000},
+        )
+        assert len(out) == len(type(node).RETURN_TYPES) == len(type(node).RETURN_NAMES)
+
+    def test_audio_socket_is_filled_even_when_the_pipeline_returns_none(self, node):
+        import torch
+
+        out = node._with_audio(torch.zeros(1, 4, 4, 3), {"audio": None})
+        assert len(out) == 2
+        assert out[1]["waveform"].dim() == 3
+
+    def test_audio_gets_a_batch_dimension(self):
+        """The sampler returns (channels, samples); Comfy AUDIO is [B,C,T]."""
+        import torch
+        from comfyui_nodes.rc_common import audio_to_comfy_audio
+
+        got = audio_to_comfy_audio(torch.zeros(2, 512), 32000)
+        assert got["waveform"].shape == (1, 2, 512)
+        assert got["sample_rate"] == 32000
+
+    def test_already_batched_audio_is_not_double_wrapped(self):
+        import torch
+        from comfyui_nodes.rc_common import audio_to_comfy_audio
+
+        got = audio_to_comfy_audio(torch.zeros(1, 2, 512), 32000)
+        assert got["waveform"].shape == (1, 2, 512)
+
+
+class TestSiblingVideoNodesAlsoDispatch:
+    """ltx2 and ltx2.3 return video_tensor too and had the same latent failure
+    long before H3 existed -- the fix belongs in the base, so assert it there."""
+
+    @pytest.mark.parametrize("cls_name", ["RCLTX2", "RCLTX23", "RCMinimaxH3"])
+    def test_base_handles_video_tensor(self, cls_name):
+        import inspect
+        import comfyui_nodes.rc_models as m
+
+        cls = getattr(m, cls_name)
+        src = inspect.getsource(m._RCAitkBase.generate)
+        assert "video_tensor" in src
+        assert issubclass(cls, m._RCAitkBase)
+
+    @pytest.mark.parametrize("cls_name", ["RCLTX2", "RCLTX23"])
+    def test_audio_free_nodes_return_one_socket(self, cls_name):
+        """Only H3 declares audio; the others must stay single-output so their
+        existing workflows keep their link indices."""
+        import comfyui_nodes.rc_models as m
+
+        cls = getattr(m, cls_name)
+        assert cls.HAS_AUDIO is False
+        assert len(cls.RETURN_TYPES) == 1

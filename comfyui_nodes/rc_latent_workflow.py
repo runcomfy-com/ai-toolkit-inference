@@ -18,12 +18,38 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .rc_common import get_or_load_pipeline, comfy_to_pil_image, pil_frames_to_comfy_images, pil_to_comfy_image
+from .rc_common import (
+    comfy_to_pil_image,
+    get_or_load_pipeline,
+    pil_frames_to_comfy_images,
+    pil_to_comfy_image,
+    video_tensor_to_comfy_images,
+)
 
 logger = logging.getLogger(__name__)
 
 # Consistent category for all latent workflow nodes
 WORKFLOW_CATEGORY = "RunComfy-Inference/Workflow"
+
+# Sentinel for the node's fps input: 0 means "whatever this pipeline generates
+# at". It has to be a value no user would ever type, because the alternative --
+# treating some real fps as "untouched" -- makes that fps unselectable. Picking
+# 16 for that role meant an explicit 16 on LTX-2 (default_fps=24) came out as 24.
+_FPS_USE_MODEL_DEFAULT = 0
+
+
+def _resolve_fps(requested: int, model_fps: int | None) -> int:
+    """Resolve the node's fps input against the pipeline's own timeline.
+
+    A model that generates on a fixed timeline knows its own fps: H3 produces
+    24 fps with audio muxed to match and rejects anything else, so a generic
+    node-wide default would fail every stock workflow. The sentinel asks for
+    that model default; anything else is the user's explicit choice and is
+    passed through untouched, including values the model will refuse.
+    """
+    if int(requested) == _FPS_USE_MODEL_DEFAULT and model_fps:
+        return int(model_fps)
+    return int(requested)
 
 
 def _comfy_batch_to_pil_list(img: torch.Tensor) -> list[Image.Image]:
@@ -172,6 +198,7 @@ class RCAITKLoadPipeline:
         "krea2_turbo",
         "krea2_o_edit",
         "krea2_o_edit_turbo",
+        "minimax_h3",
         # Video models
         "ltx2",
         "ltx2.3",
@@ -261,6 +288,7 @@ class RCAITKLoadPipeline:
             "krea2_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2TurboPipeline"]).Krea2TurboPipeline,
             "krea2_o_edit": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditPipeline"]).Krea2EditPipeline,
             "krea2_o_edit_turbo": lambda: __import__("src.pipelines.krea2", fromlist=["Krea2EditTurboPipeline"]).Krea2EditTurboPipeline,
+            "minimax_h3": lambda: __import__("src.pipelines.minimax_h3", fromlist=["MinimaxH3Pipeline"]).MinimaxH3Pipeline,
         }
 
         if pipeline not in ctor_map:
@@ -620,7 +648,7 @@ class RCAITKGenerate:
                 "control_image_2": ("IMAGE",),
                 "control_image_3": ("IMAGE",),
                 "num_frames": ("INT", {"default": 41, "min": 1, "max": 201, "tooltip": "For video models only"}),
-                "fps": ("INT", {"default": 16, "min": 1, "max": 120, "tooltip": "For video models only"}),
+                "fps": ("INT", {"default": _FPS_USE_MODEL_DEFAULT, "min": 0, "max": 120, "tooltip": "For video models only. 0 uses the model's own fps (e.g. MiniMax-H3 is fixed at 24); any other value is passed through, and a model that cannot honour it will say so."}),
                 "kv_cache": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.kv_cache -- it changes the reference attention mask, so a mismatch silently produces wrong output. Set false for adapters trained before 2026-07-16. Ignored by other models."}),
                 "match_target_res": ("BOOLEAN", {"default": True, "tooltip": "Krea 2 edit only. Must match the training config's model_kwargs.match_target_res. Ignored by other models."}),
             },
@@ -665,8 +693,15 @@ class RCAITKGenerate:
             base = [ctrl_img] if ctrl_img is not None else []
             ctrl_imgs = base + extras
 
-        # Check if this is a video model
-        is_video = getattr(getattr(pipe, "CONFIG", None), "is_video", False)
+        # Check if this is a video model. NOTE the field is is_video_model --
+        # PipelineConfig has never had an `is_video` attribute, so the old
+        # getattr(..., "is_video", False) silently evaluated False for every
+        # video model and dropped num_frames/fps from the generate() call.
+        is_video = getattr(getattr(pipe, "CONFIG", None), "is_video_model", False)
+
+        effective_fps = _resolve_fps(
+            fps, getattr(getattr(pipe, "CONFIG", None), "default_fps", None)
+        )
 
         # Model-specific options that must match how the LoRA was trained.
         # BasePipeline.apply_model_options() is a no-op for models that declare
@@ -693,7 +728,7 @@ class RCAITKGenerate:
                 control_image=ctrl_img,
                 control_images=ctrl_imgs,
                 num_frames=int(num_frames) if is_video else None,
-                fps=int(fps) if is_video else None,
+                fps=effective_fps if is_video else None,
             )
 
         # Handle result
@@ -703,6 +738,10 @@ class RCAITKGenerate:
         frames = result.get("frames")
         if frames:
             return (pil_frames_to_comfy_images(frames),)
+
+        video_tensor = result.get("video_tensor")
+        if video_tensor is not None:
+            return (video_tensor_to_comfy_images(video_tensor),)
 
         raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")
 
