@@ -103,10 +103,12 @@ Video pipelines return an `IMAGE` batch where the batch dimension is frames:
 - `RCWan21I2V14B`, `RCWan21I2V14B480P`
 - `RCWan22T2V14B`, `RCWan22I2V14B`
 - `RCWan22TI2V5B`
-- `RCMinimaxH3` — video **with joint stereo audio**. Fixed 24 fps; `num_frames`
+- `RCMinimaxH3` — video **with joint stereo audio**. This is the one node with a
+  second output: `AUDIO`, wired straight into `SaveAudio` or `VHS_VideoCombine`.
+  Fixed 24 fps; `num_frames`
   snaps down to the `17n+5` grid (5, 22, 39, 56, 73, 90, 107, 124). Leave `fps`
-  at the node default and the model's own 24 is used. Guidance-distilled, so
-  `negative_prompt` is inert.
+  at 0 and the model's own 24 is used. Guidance-distilled, so `negative_prompt`
+  is inert.
 
 They expose `num_frames` and `fps` as optional inputs.
 

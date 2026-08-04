@@ -334,3 +334,98 @@ class TestGenericGenerateNodeFps:
         from comfyui_nodes.rc_latent_workflow import _resolve_fps
 
         assert _resolve_fps(requested, model_default) == expected
+
+
+class TestNodeResultDispatch:
+    """The node runs the full generation before it looks at the result keys, so
+    a key it does not handle is the most expensive possible way to fail. This
+    pins the dispatch for every shape a pipeline can return."""
+
+    @pytest.fixture
+    def node(self):
+        from comfyui_nodes.rc_models import RCMinimaxH3
+
+        return RCMinimaxH3()
+
+    def test_video_tensor_is_handled(self, node):
+        """H3 (and ltx2/ltx2.3) never populate `frames`."""
+        import torch
+        from comfyui_nodes.rc_common import video_tensor_to_comfy_images
+
+        video = torch.randint(0, 256, (4, 8, 8, 3), dtype=torch.uint8)
+        images, _audio = node._with_audio(
+            video_tensor_to_comfy_images(video),
+            {"audio": torch.zeros(2, 100), "audio_sample_rate": 32000},
+        )
+        assert images.shape == (4, 8, 8, 3)
+        assert images.dtype == torch.float32
+        assert 0.0 <= float(images.min()) and float(images.max()) <= 1.0
+
+    def test_uint8_scaling_is_a_rescale_not_a_permute(self):
+        """Routing these through the `frames=` path would give [T,C,H,W]."""
+        import torch
+        from comfyui_nodes.rc_common import video_tensor_to_comfy_images
+
+        video = torch.full((2, 4, 6, 3), 255, dtype=torch.uint8)
+        out = video_tensor_to_comfy_images(video)
+        assert out.shape == (2, 4, 6, 3)
+        assert torch.allclose(out, torch.ones_like(out))
+
+    def test_return_tuple_matches_declared_sockets(self, node):
+        """A tuple shorter or longer than RETURN_TYPES desyncs every downstream
+        link in the graph."""
+        import torch
+
+        out = node._with_audio(
+            torch.zeros(1, 4, 4, 3),
+            {"audio": torch.zeros(2, 100), "audio_sample_rate": 32000},
+        )
+        assert len(out) == len(type(node).RETURN_TYPES) == len(type(node).RETURN_NAMES)
+
+    def test_audio_socket_is_filled_even_when_the_pipeline_returns_none(self, node):
+        import torch
+
+        out = node._with_audio(torch.zeros(1, 4, 4, 3), {"audio": None})
+        assert len(out) == 2
+        assert out[1]["waveform"].dim() == 3
+
+    def test_audio_gets_a_batch_dimension(self):
+        """The sampler returns (channels, samples); Comfy AUDIO is [B,C,T]."""
+        import torch
+        from comfyui_nodes.rc_common import audio_to_comfy_audio
+
+        got = audio_to_comfy_audio(torch.zeros(2, 512), 32000)
+        assert got["waveform"].shape == (1, 2, 512)
+        assert got["sample_rate"] == 32000
+
+    def test_already_batched_audio_is_not_double_wrapped(self):
+        import torch
+        from comfyui_nodes.rc_common import audio_to_comfy_audio
+
+        got = audio_to_comfy_audio(torch.zeros(1, 2, 512), 32000)
+        assert got["waveform"].shape == (1, 2, 512)
+
+
+class TestSiblingVideoNodesAlsoDispatch:
+    """ltx2 and ltx2.3 return video_tensor too and had the same latent failure
+    long before H3 existed -- the fix belongs in the base, so assert it there."""
+
+    @pytest.mark.parametrize("cls_name", ["RCLTX2", "RCLTX23", "RCMinimaxH3"])
+    def test_base_handles_video_tensor(self, cls_name):
+        import inspect
+        import comfyui_nodes.rc_models as m
+
+        cls = getattr(m, cls_name)
+        src = inspect.getsource(m._RCAitkBase.generate)
+        assert "video_tensor" in src
+        assert issubclass(cls, m._RCAitkBase)
+
+    @pytest.mark.parametrize("cls_name", ["RCLTX2", "RCLTX23"])
+    def test_audio_free_nodes_return_one_socket(self, cls_name):
+        """Only H3 declares audio; the others must stay single-output so their
+        existing workflows keep their link indices."""
+        import comfyui_nodes.rc_models as m
+
+        cls = getattr(m, cls_name)
+        assert cls.HAS_AUDIO is False
+        assert len(cls.RETURN_TYPES) == 1

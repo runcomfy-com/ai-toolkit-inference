@@ -69,6 +69,27 @@ def pil_frames_to_comfy_images(frames: List[Image.Image]) -> torch.Tensor:
     return torch.from_numpy(batch)
 
 
+def video_tensor_to_comfy_images(video_tensor: torch.Tensor) -> torch.Tensor:
+    """Convert a decoded video tensor to a ComfyUI IMAGE batch.
+
+    Pipelines that decode straight to a tensor instead of PIL frames (ltx2,
+    ltx2.3, minimax_h3) return [T,H,W,C] uint8 in 0..255. Comfy wants the same
+    layout as float in 0..1, so this is only a rescale -- do NOT route these
+    through the `frames=` path, which permutes to [T,C,H,W].
+    """
+    return video_tensor.float() / 255.0
+
+
+def audio_to_comfy_audio(audio: torch.Tensor, sample_rate: int) -> dict:
+    """Wrap a decoded waveform in ComfyUI's AUDIO dict.
+
+    The H3 sampler returns (channels, samples) (pipeline.py:208, stereo);
+    Comfy's AUDIO carries a batch dimension in front.
+    """
+    waveform = audio if audio.dim() == 3 else audio.unsqueeze(0)
+    return {"waveform": waveform.cpu().float(), "sample_rate": int(sample_rate)}
+
+
 def _normalize_lora_paths_for_cache(lora_paths: List[Union[str, Dict[str, str]]]) -> Tuple:
     """Turn lora_paths into a hashable key.
 

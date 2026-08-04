@@ -20,10 +20,12 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 
 from .rc_common import (
+    audio_to_comfy_audio,
     comfy_to_pil_image,
     get_or_load_pipeline,
     pil_frames_to_comfy_images,
     pil_to_comfy_image,
+    video_tensor_to_comfy_images,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,11 @@ class _RCAitkBase:
     RETURN_NAMES = ("image",)
     FUNCTION = "generate"
     CATEGORY = "RunComfy-Inference"
+
+    # Subclasses whose pipeline emits a waveform set this AND widen
+    # RETURN_TYPES/RETURN_NAMES to match; the two have to move together or the
+    # returned tuple stops lining up with the declared sockets.
+    HAS_AUDIO = False
 
     def _pipeline_ctor(self):
         raise NotImplementedError
@@ -325,9 +332,44 @@ class _RCAitkBase:
 
         frames = result.get("frames")
         if frames:
-            return (pil_frames_to_comfy_images(frames),)
+            return self._with_audio(pil_frames_to_comfy_images(frames), result)
+
+        # ltx2, ltx2.3 and minimax_h3 decode straight to a tensor and never
+        # populate `frames`. Without this branch those nodes run the whole
+        # generation and only then raise -- the most expensive way to fail.
+        video_tensor = result.get("video_tensor")
+        if video_tensor is not None:
+            return self._with_audio(video_tensor_to_comfy_images(video_tensor), result)
 
         raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")
+
+    def _with_audio(self, images, result):
+        """Append the AUDIO output for classes that declare one.
+
+        RETURN_TYPES is read off the class by ComfyUI, so a node either always
+        has the socket or never does; HAS_AUDIO is what keeps the tuple the same
+        length as the sockets. A model that declares audio but returns none
+        (with_audio disabled, or a decode that produced nothing) still has to
+        fill the socket, hence the silent fallback.
+        """
+        if not self.HAS_AUDIO:
+            return (images,)
+
+        audio = result.get("audio")
+        if audio is None:
+            sample_rate = int(result.get("audio_sample_rate") or 32000)
+            silence = torch.zeros(1, 2, 1)
+            logger.warning(
+                "%s declares an audio output but the pipeline returned none; "
+                "emitting silence to keep the socket populated",
+                type(self).__name__,
+            )
+            return (images, {"waveform": silence, "sample_rate": sample_rate})
+
+        return (
+            images,
+            audio_to_comfy_audio(audio, result.get("audio_sample_rate") or 32000),
+        )
 
 
 # ===== Model-specific nodes =====
@@ -833,6 +875,12 @@ class RCMinimaxH3(_RCAitkBase):
     # Components are placed manually in _load_pipeline, so the generic offload
     # paths are no-ops for this model.
     DEFAULT_OFFLOAD_MODE = "none"
+    # The video and its stereo waveform come out of one forward pass -- joint
+    # audio is the reason to reach for this model, so the node exposes it rather
+    # than dropping it on the floor. The sampler returns (2, samples) at 32 kHz.
+    HAS_AUDIO = True
+    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_NAMES = ("image", "audio")
 
     def _pipeline_ctor(self):
         from src.pipelines.minimax_h3 import MinimaxH3Pipeline

@@ -18,7 +18,13 @@ import numpy as np
 import torch
 from PIL import Image
 
-from .rc_common import get_or_load_pipeline, comfy_to_pil_image, pil_frames_to_comfy_images, pil_to_comfy_image
+from .rc_common import (
+    comfy_to_pil_image,
+    get_or_load_pipeline,
+    pil_frames_to_comfy_images,
+    pil_to_comfy_image,
+    video_tensor_to_comfy_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -733,11 +739,9 @@ class RCAITKGenerate:
         if frames:
             return (pil_frames_to_comfy_images(frames),)
 
-        # Video pipelines that decode straight to a tensor (minimax_h3) return
-        # [T,H,W,C] uint8; Comfy wants [T,H,W,C] float in 0..1.
         video_tensor = result.get("video_tensor")
         if video_tensor is not None:
-            return (video_tensor.float() / 255.0,)
+            return (video_tensor_to_comfy_images(video_tensor),)
 
         raise ValueError(f"Unexpected pipeline result keys: {list(result.keys())}")
 
