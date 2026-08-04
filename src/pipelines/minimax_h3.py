@@ -23,7 +23,7 @@ Those leaf modules import only torch / numpy / PIL and one diffusers helper --
 no toolkit.* -- so they load standalone without dragging in ai-toolkit's
 21-architecture __init__.
 
-LORA IS ATTACHED LIVE, NOT MERGED. See _H3LoraLinear: merging into an
+LORA IS ATTACHED LIVE, NOT MERGED. See _make_lora_hook: merging into an
 int8-ConvRot base is dequantize -> add -> requantize, which resamples every row
 scale (ai-toolkit toolkit/network_mixins.py:381-384, :407-410 document ~0.1%
 output drift per merge cycle per layer). Training never merges either --
@@ -194,8 +194,8 @@ def _load_aitk_h3_modules() -> Dict[str, Any]:
     return modules
 
 
-class _H3LoraLinear(torch.nn.Module):
-    """Live additive LoRA over a (possibly quantized) linear.
+def _make_lora_hook(down: torch.Tensor, up: torch.Tensor, scale: float):
+    """Build a forward hook applying a live additive LoRA to a linear's output.
 
     Mirrors ai-toolkit's LoRAModule.forward (toolkit/network_mixins.py:304-315):
     ``org_forward(x) + lora_up(lora_down(x)) * scale``.
@@ -205,23 +205,24 @@ class _H3LoraLinear(torch.nn.Module):
     (network_mixins.py:381-384) with ~0.1% output drift per cycle per layer
     (:407-410). The trainer's preview never merges, so merging here would make
     inference structurally different from the thing we are trying to match.
+
+    A HOOK rather than a wrapper module, and that distinction is load-bearing:
+    upstream reads attributes straight off the linear it owns — e.g.
+    transformer.py:217 does ``temb.to(self.linear.weight.dtype)`` on
+    ``adaln_proj.linear``. Swapping in a wrapper hides ``.weight`` and raises
+    AttributeError mid-forward. A hook leaves the module, its class and every
+    attribute untouched, so no amount of upstream introspection can notice it.
     """
 
-    def __init__(self, base: torch.nn.Module, down: torch.Tensor, up: torch.Tensor, scale: float):
-        super().__init__()
-        self.base = base
-        # kept as plain buffers: these are frozen at inference
-        self.register_buffer("down", down, persistent=False)
-        self.register_buffer("up", up, persistent=False)
-        self.scale = float(scale)
+    def hook(module, args, output):
+        if scale == 0.0:
+            return output
+        x = args[0]
+        h = torch.nn.functional.linear(x.to(down.dtype), down)
+        delta = torch.nn.functional.linear(h, up)
+        return output + delta.to(output.dtype) * scale
 
-    def forward(self, x, *args, **kwargs):
-        out = self.base(x, *args, **kwargs)
-        if self.scale == 0.0:
-            return out
-        h = torch.nn.functional.linear(x.to(self.down.dtype), self.down)
-        delta = torch.nn.functional.linear(h, self.up)
-        return out + delta.to(out.dtype) * self.scale
+    return hook
 
 
 class _ModelShim:
@@ -306,6 +307,8 @@ class MinimaxH3Pipeline(BasePipeline):
         self._model_shim = None
         self._lora_path = None
         self._lora_scale = 1.0
+        # forward-hook handles from _attach_lora; kept so a reload can detach
+        self._lora_handles: List[Any] = []
 
     # ------------------------------------------------------------------
     # loading
@@ -336,20 +339,28 @@ class MinimaxH3Pipeline(BasePipeline):
         self._load_pipeline()
 
     def _resolve_comfy_file(self, component: str) -> str:
-        """Find a weight file locally, else download it.
+        """Find a weight file locally, else pull it through the HF cache.
 
-        Simplified from minimax_h3.py:215-261: the inference service always
-        works against a populated model cache (src/services/download_config.py
-        pre-fetches these four files), so the model_kwargs override chain and
-        the name_or_path-as-local-folder branch are dropped. The recursive
-        search under the category folder is kept, because the cache layout puts
-        files under a snapshot subdirectory.
+        BasePipeline has no model_path attribute and settings has no
+        models_path -- krea2.py:530 goes straight to hf_hub_download, and so do
+        we. An explicit directory is still honoured via MINIMAX_H3_MODELS_DIR or
+        MODELS_PATH, which is what a preloaded pod (or a parity harness) sets
+        after a snapshot_download(local_dir=...); that layout is repo-relative,
+        so the category subdirectory is part of the path. The recursive search
+        covers a cache layout that buries files under a snapshot dir.
         """
         rel_path = COMFY_FILES[component]
         filename = os.path.basename(rel_path)
         category = os.path.dirname(rel_path)
 
-        roots = [r for r in (self.model_path, settings.models_path) if r]
+        roots = [
+            r
+            for r in (
+                os.environ.get("MINIMAX_H3_MODELS_DIR"),
+                os.environ.get("MODELS_PATH"),
+            )
+            if r
+        ]
         for root in roots:
             for rel in (rel_path, filename):
                 candidate = os.path.join(root, rel)
@@ -362,11 +373,8 @@ class MinimaxH3Pipeline(BasePipeline):
 
         import huggingface_hub
 
-        target = roots[0] if roots else None
         logger.info(f"Downloading {rel_path} from {COMFY_REPO}")
-        return huggingface_hub.hf_hub_download(
-            repo_id=COMFY_REPO, filename=rel_path, local_dir=target
-        )
+        return huggingface_hub.hf_hub_download(repo_id=COMFY_REPO, filename=rel_path)
 
     @staticmethod
     def _find_file_recursive(root_dir: str, filename: str) -> Optional[str]:
@@ -413,7 +421,7 @@ class MinimaxH3Pipeline(BasePipeline):
             transformer = transformer_mod.MiniMaxH3Transformer(params)
 
         state_dict, num_quantized = import_comfy_quantized_layers(
-            transformer, state_dict, orig_dtype=self.torch_dtype
+            transformer, state_dict, orig_dtype=self.dtype
         )
         if num_quantized:
             logger.info(f" - attached {num_quantized} pre-quantized ConvRot layers")
@@ -491,7 +499,7 @@ class MinimaxH3Pipeline(BasePipeline):
         state_dict, num_quantized = import_comfy_quantized_layers(
             text_encoder,
             state_dict,
-            orig_dtype=self.torch_dtype,
+            orig_dtype=self.dtype,
             key_map=key_map,
         )
         logger.info(f" - attached {num_quantized} pre-quantized nvfp4/int8 layers")
@@ -603,6 +611,10 @@ class MinimaxH3Pipeline(BasePipeline):
         """
         from safetensors.torch import load_file
 
+        for h in self._lora_handles:
+            h.remove()
+        self._lora_handles = []
+
         sd = load_file(lora_path)
 
         pairs: Dict[str, Dict[str, torch.Tensor]] = {}
@@ -640,24 +652,17 @@ class MinimaxH3Pipeline(BasePipeline):
             rank = wt["down"].shape[0]
             alpha = alphas.get(module_name, rank)  # peft: alpha == rank
             scale = (alpha / rank) * lora_scale
-            parent_name, _, attr = module_name.rpartition(".")
-            parent = modules.get(parent_name) if parent_name else transformer
-            if parent is None:
-                skipped.append(f"{module_name} (no parent)")
-                continue
             device = next(
                 (p.device for p in target.parameters(recurse=False)), self.device
             )
-            setattr(
-                parent,
-                attr,
-                _H3LoraLinear(
-                    target,
+            handle = target.register_forward_hook(
+                _make_lora_hook(
                     wt["down"].to(device, torch.float32),
                     wt["up"].to(device, torch.float32),
                     scale,
-                ),
+                )
             )
+            self._lora_handles.append(handle)
             attached += 1
 
         if attached == 0:
@@ -685,21 +690,25 @@ class MinimaxH3Pipeline(BasePipeline):
         self.tokenizer, self.processor, self.text_encoder = self._load_text_encoder()
         self.video_vae, self.audio_vae = self._load_vaes()
 
-        if self._lora_path:
-            self._attach_lora(self.transformer, self._lora_path, self._lora_scale)
-
         device = self.device
         self.transformer.to(device)
         self.text_encoder.to(device)
         self.video_vae.to(device)
         self.audio_vae.to(device)
 
+        # AFTER the .to(device) above, deliberately: the LoRA tensors live in a
+        # hook closure, not in the module tree, so .to() would not move them —
+        # attaching first leaves them on CPU and the first matmul dies with
+        # "mat2 is on cpu, different from other tensors on cuda:0".
+        if self._lora_path:
+            self._attach_lora(self.transformer, self._lora_path, self._lora_scale)
+
         self._model_shim = _ModelShim(
             transformer=self.transformer,
             video_vae=self.video_vae,
             audio_vae=self.audio_vae,
             device=torch.device(device),
-            dtype=self.torch_dtype,
+            dtype=self.dtype,
             packing=packing,
         )
         self.pipe = pipeline_mod.MiniMaxH3Pipeline(self._model_shim)
@@ -728,7 +737,7 @@ class MinimaxH3Pipeline(BasePipeline):
             prompt.strip(),
             keyframes=keyframes,
             device=torch.device(self.device),
-            dtype=self.torch_dtype,
+            dtype=self.dtype,
         )
         return SimpleNamespace(text_embeds=[embeds], text_token_tags=[tags])
 
