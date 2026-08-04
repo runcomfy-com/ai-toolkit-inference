@@ -78,6 +78,13 @@ class ModelType(str, Enum):
     KREA2_O_EDIT = "krea2_o_edit"  # ai-toolkit arch: krea2:o_edit
     KREA2_O_EDIT_TURBO = "krea2_o_edit_turbo"  # ai-toolkit arch: krea2:o_edit_turbo
 
+    # MiniMax-H3: video + joint stereo audio. Only the fl2va partition is
+    # exposed; ref2va is a different conditioning contract that nothing in the
+    # shared pipeline distinguishes yet (keyframe anchors key off ctrl_img
+    # presence alone), so shipping it would silently build first-frame rows for
+    # a reference model.
+    MINIMAX_H3 = "minimax_h3"  # ai-toolkit arch: minimax_h3
+
 
 def get_supported_models() -> list[str]:
     """Get list of all supported model type values."""
