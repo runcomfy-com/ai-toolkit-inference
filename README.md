@@ -72,7 +72,9 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 
 
 The first `0.12.2` row is the MiniMax-H3 release, built from ai-toolkit tag
-`v0.12.2-202608042` (digest `sha256:435e4722…`).
+`v0.12.2-202608042`. Both registries carry that image at digest
+`sha256:435e4722351ceb5caa672f5f7b201089b09a7bcfe2fca8f3112c93098cbf5da6` —
+the immutable identity to pull or verify by, where the tag is merely mutable.
 
 `v0.12.2.202608111` is a hotfix rebuild against ai-toolkit `v0.12.2-202608111`,
 which cherry-picks upstream [`139a38f5`](https://github.com/ostris/ai-toolkit/commit/139a38f5bde9782ca89bd7308edc3a185ef08040)
