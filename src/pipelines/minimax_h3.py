@@ -237,10 +237,20 @@ def _make_lora_hook(down: torch.Tensor, up: torch.Tensor, scale: float):
 
     A HOOK rather than a wrapper module, and that distinction is load-bearing:
     upstream reads attributes straight off the linear it owns — e.g.
-    transformer.py:217 does ``temb.to(self.linear.weight.dtype)`` on
-    ``adaln_proj.linear``. Swapping in a wrapper hides ``.weight`` and raises
-    AttributeError mid-forward. A hook leaves the module, its class and every
-    attribute untouched, so no amount of upstream introspection can notice it.
+    ``adaln_proj`` reaches for ``self.linear.weight`` directly. Swapping in a
+    wrapper hides ``.weight`` and raises AttributeError mid-forward. A hook
+    leaves the module, its class and every attribute untouched, so no amount
+    of upstream introspection can notice it.
+
+    Known no-op as of ai-toolkit's fp32-AdaLN fix (139a38f5, in our
+    v0.12.2-202608111): ``MiniMaxH3AdalnProj.forward`` now calls
+    ``F.linear(temb.float(), self.linear.weight.float(), ...)`` instead of
+    ``self.linear(...)``, which bypasses Module.__call__ — so hooks on
+    ``blocks.N.adaln_proj.linear`` never fire there. This is NOT a parity bug:
+    the trainer's LoRA attaches by replacing that same module's ``.forward``
+    (lora_special.py:132-134), which the functional call bypasses identically.
+    Both sides drop the adaln delta in lockstep, which is the only behavior
+    that matches what a user's training previews show.
     """
 
     def hook(module, args, output):

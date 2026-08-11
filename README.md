@@ -68,11 +68,23 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 | `v0.7.29.202604051` | `0.7.29`                        | [`4ad14d211a969c217bf5470213c04c6052d17592`](https://github.com/ostris/ai-toolkit/commit/4ad14d211a969c217bf5470213c04c6052d17592) |
 | `v0.11.0.202607241` | `0.11.0`                        | [`c4db100e172064117ad18b46898226a036c1b197`](https://github.com/ostris/ai-toolkit/commit/c4db100e172064117ad18b46898226a036c1b197) |
 | `v0.12.2.202608041` | `0.12.2`                        | [`a9a04547e92a51583999ea2e7da8792da80e0d7a`](https://github.com/ostris/ai-toolkit/commit/a9a04547e92a51583999ea2e7da8792da80e0d7a) |
+| `v0.12.2.202608111` | `0.12.2`                        | [`a9a04547e92a51583999ea2e7da8792da80e0d7a`](https://github.com/ostris/ai-toolkit/commit/a9a04547e92a51583999ea2e7da8792da80e0d7a) |
 
 
-The `0.12.2` row is the MiniMax-H3 release. The image is built from ai-toolkit
-tag `v0.12.2-202608042`, and both registries carry it at digest
-`sha256:435e4722351ceb5caa672f5f7b201089b09a7bcfe2fca8f3112c93098cbf5da6`.
+The first `0.12.2` row is the MiniMax-H3 release, built from ai-toolkit tag
+`v0.12.2-202608042` (digest `sha256:435e4722…`).
+
+`v0.12.2.202608111` is a hotfix rebuild against ai-toolkit `v0.12.2-202608111`,
+which cherry-picks upstream [`139a38f5`](https://github.com/ostris/ai-toolkit/commit/139a38f5bde9782ca89bd7308edc3a185ef08040)
+(fp32 AdaLN — pruned checkpoints store those projections fp16, whose 65504
+ceiling overflows; suspected trigger of illegal-memory-access crashes on
+production workers) and its follow-up [`7309db4d`](https://github.com/ostris/ai-toolkit/commit/7309db4d).
+Nothing else moves relative to `-202608042`. Side effect worth knowing: the fix
+calls the adaln projection functionally, so LoRA deltas on
+`blocks.N.adaln_proj.linear` no longer apply — on the trainer *and* here, in
+lockstep (both attach via the module-call machinery the functional call
+bypasses). This release also makes the worker exit (code 70) on a fatal CUDA
+error instead of serving further requests from a poisoned context.
 
 Note that `a9a04547` predates upstream's `18f5810d` ("Adjust default
 alpha for h3"), which pairs `network.linear_alpha` with the rank in the H3 arch
