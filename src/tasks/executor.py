@@ -44,6 +44,15 @@ _FATAL_CUDA_MARKERS = (
 
 
 def _is_fatal_accelerator_error(exc: BaseException) -> bool:
+    """ADVISORY ONLY — never a kill decision on its own.
+
+    Exception text is attacker-influenced: loras[].path is an arbitrary URL
+    and the download path propagates the remote server's reason text into the
+    exception, so a URL answering "500 illegal memory access" would match
+    these markers on a perfectly healthy worker. The probe is the sole
+    authority on whether the context is dead; this classifier only enriches
+    the log line when the two agree.
+    """
     import torch
 
     if isinstance(exc, getattr(torch, "OutOfMemoryError", ()) or ()):
@@ -264,15 +273,22 @@ class InferenceExecutor:
             self.storage.update(task)
 
             # The failed status is written; now decide whether this process is
-            # allowed to take another request at all. Gated on the CONFIGURED
-            # device being CUDA: a cpu worker stays up no matter what a stray
-            # GPU error message says.
+            # allowed to take another request at all. The probe is the ONLY
+            # thing that can kill the worker: every fatal CUDA state (illegal
+            # access, device-side assert, launch failure, ECC, misalignment)
+            # is sticky — after any of them every subsequent CUDA call in the
+            # process re-raises — so a poisoned context cannot pass a
+            # synchronize-plus-alloc, and a context that passes is healthy no
+            # matter what the exception text claims. Exception text alone is
+            # spoofable (see _is_fatal_accelerator_error) and only labels the
+            # log line. Gated on the CONFIGURED device being CUDA: a cpu
+            # worker stays up no matter what a stray GPU message says.
             device = getattr(self.pipeline_manager, "device", "cuda")
-            if _device_is_cuda(device):
+            if _device_is_cuda(device) and _cuda_context_is_poisoned(device):
                 if _is_fatal_accelerator_error(e):
-                    _die_worker(f"fatal accelerator error: {e}")
-                elif _cuda_context_is_poisoned(device):
-                    _die_worker("context probe failed after task failure")
+                    _die_worker(f"context probe failed; exception carried a fatal CUDA marker: {e}")
+                else:
+                    _die_worker(f"context probe failed after task failure: {e}")
 
         # Note: Pipeline is now cached by PipelineManager, no need to unload after each request
         # The pipeline will be reused for subsequent requests with the same model

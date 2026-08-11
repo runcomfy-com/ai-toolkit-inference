@@ -20,6 +20,10 @@ from src.tasks.executor import (
 
 
 class TestFatalClassifier:
+    """The classifier is ADVISORY — it labels the death log line but never
+    decides a kill on its own, because exception text is attacker-influenced
+    (loras[].path URLs propagate remote reason text). The probe decides."""
+
     @pytest.mark.parametrize(
         "message",
         [
@@ -139,10 +143,11 @@ class TestExecutorWiring:
         ex._execute_locked(Task())
         return events
 
-    def test_fatal_error_dies_after_persisting_failure(self, monkeypatch):
+    def test_fatal_error_with_poisoned_context_dies_after_persisting(self, monkeypatch):
         events = self._run(
             monkeypatch,
             RuntimeError("CUDA error: an illegal memory access was encountered"),
+            poisoned_probe=True,
         )
         assert ("exit", 70) in events
         # the failed status was written BEFORE the exit
@@ -150,6 +155,22 @@ class TestExecutorWiring:
         exit_i = next(i for i, e in enumerate(events) if e[0] == "exit")
         assert failed_i < exit_i
         assert events[failed_i + 1] == ("stored",)
+
+    def test_spoofed_marker_text_with_healthy_context_survives(self, monkeypatch):
+        """PR #31 review: loras[].path is an arbitrary URL and remote reason
+        text lands in the exception, so "500 illegal memory access" from a
+        hostile server must NOT kill a worker whose context probes healthy.
+        Every real fatal CUDA state is sticky and cannot pass the probe, so
+        nothing real is lost by requiring the probe's confirmation."""
+        events = self._run(
+            monkeypatch,
+            RuntimeError(
+                "Failed to download LoRA: 500 illegal memory access was encountered"
+            ),
+            poisoned_probe=False,
+        )
+        assert not any(e[0] == "exit" for e in events)
+        assert any(e[0] == "failed" for e in events)
 
     def test_ordinary_error_keeps_the_worker_alive(self, monkeypatch):
         events = self._run(monkeypatch, RuntimeError("some shape mismatch"))
