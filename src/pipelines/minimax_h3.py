@@ -275,12 +275,13 @@ class _StepObserverHook:
     One transformer forward == one sampling step here: H3 is guidance-distilled
     and runs a single pass per step, with no CFG batch to double-count.
 
-    Measured: the sampler runs num_inference_steps - 1 forwards, because
-    pipeline.py:158 derives its loop from `sigmas_v.shape[0] - 1` and the
-    schedule holds exactly num_inference_steps sigmas. Rather than hardcode that
-    off-by-one — an upstream detail that could change — the bar is reported
-    against the requested step count and topped up on close, so the user sees
-    the number they asked for and it always finishes at 100%.
+    Forward count per run is an upstream detail that HAS changed once already:
+    pre-0.12.11 sampler builds ran num_inference_steps - 1 forwards (loop over
+    `sigmas_v.shape[0] - 1` with num_inference_steps sigmas); ai-toolkit
+    685ce37a (in 0.12.11) regrids to steps + 1 sigmas, i.e. exactly
+    num_inference_steps forwards. This hook deliberately hardcodes neither: the
+    bar is reported against the requested step count, clamped at the top, and
+    topped up on close — correct against both generations of the sampler.
 
     The observer raises to interrupt (comfy_callbacks calls
     throw_exception_if_processing_interrupted), which propagates out of the

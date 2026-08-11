@@ -121,6 +121,6 @@ The third row is the useful control: two independent full runs producing byte-id
 
 - Confirm the **effective** `num_frames` after snapping — the grid is 17n+5, not arbitrary.
 - Confirm the **effective** width/height after the ×32 floor.
-- Match `sample_steps`; the sampler runs `num_inference_steps - 1` denoise passes.
+- Match `sample_steps` — and match the toolkit generation. As of ai-toolkit 0.12.11 the sampler runs exactly `num_inference_steps` model evaluations; earlier builds ran one fewer, so the same `sample_steps` value produces slightly different output across that boundary.
 - Match `loras[].network_multiplier`. Missing `.alpha` tensors default to **rank**, not 1 — a LoRA saved in PEFT format has them stripped with `alpha == rank`.
 - For i2v, match the control image and remember it is resized to the model's canvas before conditioning.

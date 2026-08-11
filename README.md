@@ -69,6 +69,7 @@ Since **ai-toolkit** does not publish tags or releases, we pin and document the 
 | `v0.11.0.202607241` | `0.11.0`                        | [`c4db100e172064117ad18b46898226a036c1b197`](https://github.com/ostris/ai-toolkit/commit/c4db100e172064117ad18b46898226a036c1b197) |
 | `v0.12.2.202608041` | `0.12.2`                        | [`a9a04547e92a51583999ea2e7da8792da80e0d7a`](https://github.com/ostris/ai-toolkit/commit/a9a04547e92a51583999ea2e7da8792da80e0d7a) |
 | `v0.12.2.202608111` | `0.12.2`                        | [`a9a04547e92a51583999ea2e7da8792da80e0d7a`](https://github.com/ostris/ai-toolkit/commit/a9a04547e92a51583999ea2e7da8792da80e0d7a) |
+| `v0.12.11.202608111` | `0.12.11`                       | [`356ce7e84eb00222a594f3faf1117c3b9313a0d5`](https://github.com/ostris/ai-toolkit/commit/356ce7e84eb00222a594f3faf1117c3b9313a0d5) |
 
 
 The first `0.12.2` row is the MiniMax-H3 release, built from ai-toolkit tag
@@ -87,6 +88,17 @@ calls the adaln projection functionally, so LoRA deltas on
 lockstep (both attach via the module-call machinery the functional call
 bypasses). This release also makes the worker exit (code 70) on a fatal CUDA
 error instead of serving further requests from a poisoned context.
+
+`v0.12.11.202608111` pairs with ai-toolkit `v0.12.11-202608111` — the trainer
+and inference moving to the same toolkit generation together. Relative to the
+`0.12.2` hotfix it inherits upstream's H3 sampler regrid (`685ce37a`: the same
+`sample_steps` now yields exactly that many model evaluations, previously one
+fewer) and carries the finished fatal-CUDA fail-fast (PR #31, all review rounds:
+probe-only kill decisions on the configured device, OOM never fatal, config
+errors never poison). The H3 training adapter that 0.12.11 makes the default
+training method does NOT need mirroring here: the trainer deactivates it while
+rendering previews, so previews remain base + user LoRA — which is what this
+server runs.
 
 Note that `a9a04547` predates upstream's `18f5810d` ("Adjust default
 alpha for h3"), which pairs `network.linear_alpha` with the rank in the H3 arch
