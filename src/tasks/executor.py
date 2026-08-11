@@ -52,21 +52,48 @@ def _is_fatal_accelerator_error(exc: BaseException) -> bool:
     return any(m in msg for m in _FATAL_CUDA_MARKERS)
 
 
-def _cuda_context_is_poisoned() -> bool:
+def _device_is_cuda(device: str) -> bool:
+    """Whether the CONFIGURED inference device is a CUDA device.
+
+    The whole fatal-error machinery is gated on this: a DEVICE=cpu worker is
+    still healthy after some stray CUDA failure elsewhere, and killing it
+    would be a false positive.
+    """
+    try:
+        import torch
+
+        return torch.device(device).type == "cuda"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def _cuda_context_is_poisoned(device: str) -> bool:
     """Probe the context instead of trusting exception classification.
 
     CUDA reports errors asynchronously, so the exception that surfaces may be
     an arbitrary downstream one whose message matches nothing. A synchronize
     plus one tiny op answers the only question that matters: will this context
     accept more work?
+
+    Probes the CONFIGURED inference device, not the process default — with
+    DEVICE=cuda:1 an argument-less synchronize would happily vouch for cuda:0
+    while the device we actually run on stays poisoned.
     """
+    try:
+        import torch
+
+        dev = torch.device(device)
+    except (RuntimeError, ValueError):
+        return False  # unparseable device string is a config error, not poison
+    if dev.type != "cuda":
+        return False
     try:
         import torch
 
         if not torch.cuda.is_available():
             return False
-        torch.cuda.synchronize()
-        (torch.zeros(1, device="cuda") + 1).item()
+        torch.cuda.synchronize(dev)
+        (torch.zeros(1, device=dev) + 1).item()
         return False
     except Exception:
         return True
@@ -237,11 +264,15 @@ class InferenceExecutor:
             self.storage.update(task)
 
             # The failed status is written; now decide whether this process is
-            # allowed to take another request at all.
-            if _is_fatal_accelerator_error(e):
-                _die_worker(f"fatal accelerator error: {e}")
-            elif _cuda_context_is_poisoned():
-                _die_worker("context probe failed after task failure")
+            # allowed to take another request at all. Gated on the CONFIGURED
+            # device being CUDA: a cpu worker stays up no matter what a stray
+            # GPU error message says.
+            device = getattr(self.pipeline_manager, "device", "cuda")
+            if _device_is_cuda(device):
+                if _is_fatal_accelerator_error(e):
+                    _die_worker(f"fatal accelerator error: {e}")
+                elif _cuda_context_is_poisoned(device):
+                    _die_worker("context probe failed after task failure")
 
         # Note: Pipeline is now cached by PipelineManager, no need to unload after each request
         # The pipeline will be reused for subsequent requests with the same model

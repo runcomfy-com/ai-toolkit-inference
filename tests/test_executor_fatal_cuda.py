@@ -12,6 +12,8 @@ import pytest
 
 from src.tasks.executor import (
     _FATAL_CUDA_MARKERS,
+    _cuda_context_is_poisoned,
+    _device_is_cuda,
     _die_worker,
     _is_fatal_accelerator_error,
 )
@@ -87,12 +89,18 @@ class TestExecutorWiring:
     """Drive InferenceExecutor.execute through a real failure and assert the
     order of operations: mark failed -> persist -> THEN die."""
 
+    DEVICE = "cuda:1"
+
     def _run(self, monkeypatch, exc, poisoned_probe=False):
         from src.tasks.executor import InferenceExecutor
 
         events = []
         monkeypatch.setattr(
-            "src.tasks.executor._cuda_context_is_poisoned", lambda: poisoned_probe
+            "src.tasks.executor._cuda_context_is_poisoned",
+            lambda device: events.append(("probed", device)) or poisoned_probe,
+        )
+        monkeypatch.setattr(
+            "src.tasks.executor._device_is_cuda", lambda device: device != "cpu"
         )
         monkeypatch.setattr("src.tasks.executor.time.sleep", lambda s: None)
         monkeypatch.setattr(
@@ -120,6 +128,8 @@ class TestExecutorWiring:
                 events.append(("stored",))
 
         class Manager:
+            device = self.DEVICE
+
             def get_pipeline(self, **kw):
                 raise exc
 
@@ -153,3 +163,37 @@ class TestExecutorWiring:
             monkeypatch, RuntimeError("some shape mismatch"), poisoned_probe=True
         )
         assert ("exit", 70) in events
+
+
+class TestDeviceGating:
+    """The probe must target the CONFIGURED device, and non-CUDA workers must
+    never die — a DEVICE=cpu worker is healthy no matter what a stray GPU
+    error message says (PR #31 review)."""
+
+    def test_probe_receives_the_configured_device(self, monkeypatch):
+        t = TestExecutorWiring()
+        events = t._run(monkeypatch, RuntimeError("some shape mismatch"))
+        assert ("probed", "cuda:1") in events
+
+    def test_cpu_worker_survives_a_fatal_looking_message(self, monkeypatch):
+        class CpuWiring(TestExecutorWiring):
+            DEVICE = "cpu"
+
+        events = CpuWiring()._run(
+            monkeypatch,
+            RuntimeError("CUDA error: an illegal memory access was encountered"),
+        )
+        assert not any(e[0] == "exit" for e in events)
+        # ...and the probe is never even consulted
+        assert not any(e[0] == "probed" for e in events)
+
+    def test_device_is_cuda_classification(self):
+        assert _device_is_cuda("cuda")
+        assert _device_is_cuda("cuda:1")
+        assert not _device_is_cuda("cpu")
+        assert not _device_is_cuda("mps")
+        assert not _device_is_cuda("not a device !!")
+
+    def test_probe_is_a_noop_for_non_cuda_devices(self):
+        assert _cuda_context_is_poisoned("cpu") is False
+        assert _cuda_context_is_poisoned("not a device !!") is False
