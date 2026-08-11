@@ -43,6 +43,16 @@ _FATAL_CUDA_MARKERS = (
 )
 
 
+def _is_oom(exc: BaseException) -> bool:
+    """Out-of-memory in either spelling: torch's dedicated type, or the CUDA
+    message on builds/paths that raise it as a plain RuntimeError."""
+    import torch
+
+    if isinstance(exc, getattr(torch, "OutOfMemoryError", ()) or ()):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
 def _is_fatal_accelerator_error(exc: BaseException) -> bool:
     """ADVISORY ONLY — never a kill decision on its own.
 
@@ -53,9 +63,7 @@ def _is_fatal_accelerator_error(exc: BaseException) -> bool:
     authority on whether the context is dead; this classifier only enriches
     the log line when the two agree.
     """
-    import torch
-
-    if isinstance(exc, getattr(torch, "OutOfMemoryError", ()) or ()):
+    if _is_oom(exc):
         return False
     msg = str(exc).lower()
     return any(m in msg for m in _FATAL_CUDA_MARKERS)
@@ -101,11 +109,24 @@ def _cuda_context_is_poisoned(device: str) -> bool:
 
         if not torch.cuda.is_available():
             return False
+        # Stage 1: synchronize. Every sticky fatal state (illegal access,
+        # device-side assert, launch failure, ECC, misalignment) re-raises
+        # here, and it allocates nothing, so it cannot OOM.
         torch.cuda.synchronize(dev)
-        (torch.zeros(1, device=dev) + 1).item()
-        return False
     except Exception:
         return True
+    try:
+        # Stage 2: one tiny alloc + op, to catch anything synchronize alone
+        # would miss.
+        (torch.zeros(1, device=dev) + 1).item()
+        return False
+    except Exception as probe_exc:
+        # A full-but-healthy allocator is NOT poison: right after a recoverable
+        # request OOM, the failed request's tensors can still be pinned by the
+        # exception's traceback, and even this 4-byte alloc can OOM. The
+        # request-level OOM exclusion would be meaningless if the probe then
+        # killed the worker anyway.
+        return not _is_oom(probe_exc)
 
 
 def _die_worker(reason: str) -> None:

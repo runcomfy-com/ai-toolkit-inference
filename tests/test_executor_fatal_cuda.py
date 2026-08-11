@@ -16,6 +16,7 @@ from src.tasks.executor import (
     _device_is_cuda,
     _die_worker,
     _is_fatal_accelerator_error,
+    _is_oom,
 )
 
 
@@ -218,3 +219,37 @@ class TestDeviceGating:
     def test_probe_is_a_noop_for_non_cuda_devices(self):
         assert _cuda_context_is_poisoned("cpu") is False
         assert _cuda_context_is_poisoned("not a device !!") is False
+
+
+class TestProbeOomExclusion:
+    """PR #31 review round 3: right after a recoverable request OOM the failed
+    request's tensors can still be pinned by the exception traceback, so even
+    the probe's 4-byte alloc can OOM. That is a full-but-healthy allocator,
+    not a poisoned context — the request-level OOM exclusion would be
+    meaningless if the probe then killed the worker anyway. The probe now
+    synchronizes first (sticky fatal states re-raise there, allocation-free)
+    and treats an alloc-stage OOM as healthy via _is_oom."""
+
+    def test_typed_oom_is_oom(self):
+        import torch
+
+        oom_type = getattr(torch, "OutOfMemoryError", None)
+        if oom_type is None:
+            pytest.skip("this torch build has no torch.OutOfMemoryError")
+        assert _is_oom(oom_type("CUDA out of memory"))
+
+    def test_message_oom_is_oom(self):
+        """Some paths raise OOM as a plain RuntimeError."""
+        assert _is_oom(RuntimeError("CUDA out of memory. Tried to allocate 512 bytes"))
+        assert _is_oom(RuntimeError("HIP OUT OF MEMORY"))
+
+    def test_fatal_states_are_not_oom(self):
+        assert not _is_oom(
+            RuntimeError("CUDA error: an illegal memory access was encountered")
+        )
+        assert not _is_oom(ValueError("Unknown model"))
+
+    def test_classifier_still_excludes_oom_through_the_shared_helper(self):
+        assert not _is_fatal_accelerator_error(
+            RuntimeError("CUDA out of memory. Tried to allocate 2.50 GiB")
+        )
