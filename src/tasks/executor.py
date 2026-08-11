@@ -27,6 +27,132 @@ from ..libs.log_context import set_request_id
 
 logger = logging.getLogger(__name__)
 
+# CUDA states that poison the whole process context. After any of these the
+# driver refuses further work in this process -- the RunPod log for minimax_h3
+# (2026-08-11) shows it exactly: one illegal-memory-access during a forward,
+# then every subsequent request on the same worker dying in milliseconds, some
+# as early as creating a text-encoder tensor. OOM is deliberately NOT here:
+# it is raised synchronously, the context stays usable, and empty_cache
+# recovers it.
+_FATAL_CUDA_MARKERS = (
+    "illegal memory access",
+    "device-side assert",
+    "unspecified launch failure",
+    "uncorrectable ecc error",
+    "misaligned address",
+)
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """Out-of-memory in either spelling: torch's dedicated type, or the CUDA
+    message on builds/paths that raise it as a plain RuntimeError."""
+    import torch
+
+    if isinstance(exc, getattr(torch, "OutOfMemoryError", ()) or ()):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
+def _is_fatal_accelerator_error(exc: BaseException) -> bool:
+    """ADVISORY ONLY — never a kill decision on its own.
+
+    Exception text is attacker-influenced: loras[].path is an arbitrary URL
+    and the download path propagates the remote server's reason text into the
+    exception, so a URL answering "500 illegal memory access" would match
+    these markers on a perfectly healthy worker. The probe is the sole
+    authority on whether the context is dead; this classifier only enriches
+    the log line when the two agree.
+    """
+    if _is_oom(exc):
+        return False
+    msg = str(exc).lower()
+    return any(m in msg for m in _FATAL_CUDA_MARKERS)
+
+
+def _device_is_cuda(device: str) -> bool:
+    """Whether the CONFIGURED inference device is a CUDA device.
+
+    The whole fatal-error machinery is gated on this: a DEVICE=cpu worker is
+    still healthy after some stray CUDA failure elsewhere, and killing it
+    would be a false positive.
+    """
+    try:
+        import torch
+
+        return torch.device(device).type == "cuda"
+    except (RuntimeError, ValueError):
+        return False
+
+
+def _cuda_context_is_poisoned(device: str) -> bool:
+    """Probe the context instead of trusting exception classification.
+
+    CUDA reports errors asynchronously, so the exception that surfaces may be
+    an arbitrary downstream one whose message matches nothing. A synchronize
+    plus one tiny op answers the only question that matters: will this context
+    accept more work?
+
+    Probes the CONFIGURED inference device, not the process default — with
+    DEVICE=cuda:1 an argument-less synchronize would happily vouch for cuda:0
+    while the device we actually run on stays poisoned.
+    """
+    try:
+        import torch
+
+        dev = torch.device(device)
+    except (RuntimeError, ValueError):
+        return False  # unparseable device string is a config error, not poison
+    if dev.type != "cuda":
+        return False
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        # A device index this host does not have is a CONFIGURATION error,
+        # not poison — is_available() does not validate the index, and
+        # synchronize(cuda:1) on a one-GPU host raises. Exiting on it would
+        # put the deployment into a permanent restart loop, because every
+        # replacement worker inherits the same bad DEVICE value.
+        if dev.index is not None and dev.index >= torch.cuda.device_count():
+            return False
+        # Stage 1: synchronize. Every sticky fatal state (illegal access,
+        # device-side assert, launch failure, ECC, misalignment) re-raises
+        # here, and it allocates nothing, so it cannot OOM.
+        torch.cuda.synchronize(dev)
+    except Exception:
+        return True
+    try:
+        # Stage 2: one tiny alloc + op, to catch anything synchronize alone
+        # would miss.
+        (torch.zeros(1, device=dev) + 1).item()
+        return False
+    except Exception as probe_exc:
+        # A full-but-healthy allocator is NOT poison: right after a recoverable
+        # request OOM, the failed request's tensors can still be pinned by the
+        # exception's traceback, and even this 4-byte alloc can OOM. The
+        # request-level OOM exclusion would be meaningless if the probe then
+        # killed the worker anyway.
+        return not _is_oom(probe_exc)
+
+
+def _die_worker(reason: str) -> None:
+    """Fail the worker fast instead of serving requests from a dead context.
+
+    Called with the inference lock held, so nothing else starts while the
+    grace period lets in-flight /status polls observe the failed state the
+    caller just wrote. os._exit skips atexit/finalizers on purpose: the CUDA
+    context is unusable, and any teardown touching it would hang or mask the
+    exit code.
+    """
+    logger.critical(
+        "CUDA context is unrecoverable (%s); exiting so the platform replaces "
+        "this worker instead of feeding it more requests",
+        reason,
+    )
+    time.sleep(3)
+    os._exit(70)
+
 
 @dataclass
 class PromptParams:
@@ -173,6 +299,24 @@ class InferenceExecutor:
             logger.error(traceback.format_exc())
             task.mark_as_failed(error=str(e), details={"traceback": traceback.format_exc()})
             self.storage.update(task)
+
+            # The failed status is written; now decide whether this process is
+            # allowed to take another request at all. The probe is the ONLY
+            # thing that can kill the worker: every fatal CUDA state (illegal
+            # access, device-side assert, launch failure, ECC, misalignment)
+            # is sticky — after any of them every subsequent CUDA call in the
+            # process re-raises — so a poisoned context cannot pass a
+            # synchronize-plus-alloc, and a context that passes is healthy no
+            # matter what the exception text claims. Exception text alone is
+            # spoofable (see _is_fatal_accelerator_error) and only labels the
+            # log line. Gated on the CONFIGURED device being CUDA: a cpu
+            # worker stays up no matter what a stray GPU message says.
+            device = getattr(self.pipeline_manager, "device", "cuda")
+            if _device_is_cuda(device) and _cuda_context_is_poisoned(device):
+                if _is_fatal_accelerator_error(e):
+                    _die_worker(f"context probe failed; exception carried a fatal CUDA marker: {e}")
+                else:
+                    _die_worker(f"context probe failed after task failure: {e}")
 
         # Note: Pipeline is now cached by PipelineManager, no need to unload after each request
         # The pipeline will be reused for subsequent requests with the same model
