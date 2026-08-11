@@ -300,3 +300,23 @@ class TestInvalidDeviceIndex:
 
         monkeypatch.setattr(torch.cuda, "synchronize", boom)
         assert _cuda_context_is_poisoned("cuda") is True
+
+
+class TestPipelinesHonorConfiguredDevice:
+    """PR #31 review round 6: wan22_5b constructed its underlying pipeline
+    with a hard-coded torch.device("cuda"), so with DEVICE=cuda:1 the sampler
+    ran on the default device while every component (and the health probe)
+    used the configured one. No pipeline may name a literal CUDA device."""
+
+    def test_no_pipeline_hardcodes_a_cuda_device(self):
+        import pathlib
+
+        offenders = []
+        for f in pathlib.Path("src/pipelines").glob("*.py"):
+            src = f.read_text()
+            if 'torch.device("cuda")' in src or "torch.device('cuda')" in src:
+                offenders.append(f.name)
+        assert offenders == [], (
+            f"hard-coded CUDA device in {offenders}; use the configured "
+            "self.device so DEVICE=cuda:N keeps the whole model on one device"
+        )

@@ -147,7 +147,13 @@ class Wan22TI2V5BPipeline(BasePipeline):
             transformer_2=transformer,  # 5B: use the same transformer
             scheduler=scheduler,
             expand_timesteps=True,  # 5B special
-            device=torch.device("cuda"),
+            # The CONFIGURED device, not a literal "cuda": components below
+            # move to self.device, and a hard-coded default here would leave
+            # the sampler's internal tensors on cuda:0 while DEVICE=cuda:1
+            # runs everything else elsewhere -- splitting the model across
+            # devices and making any context-health probe of the configured
+            # device vouch for the wrong context.
+            device=torch.device(self.device),
             aggressive_offload=False,
         )
         logger.info(f"Wan22Pipeline created successfully")
