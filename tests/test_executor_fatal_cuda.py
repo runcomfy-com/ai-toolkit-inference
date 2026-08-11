@@ -253,3 +253,50 @@ class TestProbeOomExclusion:
         assert not _is_fatal_accelerator_error(
             RuntimeError("CUDA out of memory. Tried to allocate 2.50 GiB")
         )
+
+
+class TestInvalidDeviceIndex:
+    """PR #31 review round 4: DEVICE=cuda:1 on a one-GPU host passes
+    is_available() (it does not validate the index) but synchronize raises an
+    invalid-device error. Classifying that as poison would exit-70 on the
+    first failed request and put the deployment into a permanent restart loop,
+    since every replacement worker inherits the same bad DEVICE value."""
+
+    def test_nonexistent_index_is_config_error_not_poison(self, monkeypatch):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+        def boom(dev):
+            raise RuntimeError("CUDA error: invalid device ordinal")
+
+        monkeypatch.setattr(torch.cuda, "synchronize", boom)
+        # guard returns False BEFORE synchronize; if the guard regresses, boom
+        # fires and the catch-all turns this into True, failing the test
+        assert _cuda_context_is_poisoned("cuda:1") is False
+
+    def test_sticky_error_on_a_real_index_is_still_poison(self, monkeypatch):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+        def boom(dev):
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+        monkeypatch.setattr(torch.cuda, "synchronize", boom)
+        assert _cuda_context_is_poisoned("cuda:1") is True
+
+    def test_bare_cuda_device_skips_the_index_guard(self, monkeypatch):
+        """torch.device("cuda").index is None — the guard must not reject it."""
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+        def boom(dev):
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+        monkeypatch.setattr(torch.cuda, "synchronize", boom)
+        assert _cuda_context_is_poisoned("cuda") is True

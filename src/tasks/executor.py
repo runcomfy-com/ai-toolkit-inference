@@ -109,6 +109,13 @@ def _cuda_context_is_poisoned(device: str) -> bool:
 
         if not torch.cuda.is_available():
             return False
+        # A device index this host does not have is a CONFIGURATION error,
+        # not poison — is_available() does not validate the index, and
+        # synchronize(cuda:1) on a one-GPU host raises. Exiting on it would
+        # put the deployment into a permanent restart loop, because every
+        # replacement worker inherits the same bad DEVICE value.
+        if dev.index is not None and dev.index >= torch.cuda.device_count():
+            return False
         # Stage 1: synchronize. Every sticky fatal state (illegal access,
         # device-side assert, launch failure, ECC, misalignment) re-raises
         # here, and it allocates nothing, so it cannot OOM.
